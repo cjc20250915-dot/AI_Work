@@ -99,7 +99,7 @@ namespace LandscapeMatrix
             }
 
             // 仅由当前切面采样决定地形：与 TrySampleFilledCell(viewX, viewY, SliceSampledZ) 一致。
-            // viewX、viewY 与 3D 切片索引一一对应，直接映射到中心 3×3：worldX = SliceMin+viewX（左→右递增），不另做镜像。
+            // viewX 为内部列索引；映射到 2D 时用 InternalViewXToDisplayColumnOffset，使中心 3×3 左→右与世界 +X 一致（90°/270° 需镜像）。
             int viewZ = _matrix.SliceSampledZ;
             for (int viewX = 0; viewX < SliceSize; viewX++)
             {
@@ -110,7 +110,8 @@ namespace LandscapeMatrix
                         continue;
                     }
 
-                    int worldX = SliceMin + viewX;
+                    int displayColumnOffset = _matrix.InternalViewXToDisplayColumnOffset(viewX);
+                    int worldX = SliceMin + displayColumnOffset;
                     int worldY = SliceMin + viewY;
                     cells[worldX, worldY] = CellType.Floor;
                 }

@@ -527,6 +527,34 @@ namespace LandscapeMatrix
             }
         }
 
+        /// <summary>
+        /// 内部 viewX（与 <see cref="TrySampleFilledCell"/> / <see cref="VoxelCenterLocalFromView"/> 一致，0..2）→
+        /// 左侧 7×7 中心 3×3 上的列偏移 0..2。与世界 +X（两视角水平方向）同向递增。
+        /// 90°/270° 时列在水平面上与世界 X 反向，需镜像，否则会与 3D 画面左右相对 180°。
+        /// </summary>
+        public int InternalViewXToDisplayColumnOffset(int internalViewX)
+        {
+            internalViewX = Mathf.Clamp(internalViewX, 0, MatrixSize - 1);
+            if (RotationStep % 2 == 0)
+            {
+                return internalViewX;
+            }
+
+            return MatrixSize - 1 - internalViewX;
+        }
+
+        /// <summary>显示列偏移 0..2（网格 x = <see cref="SliceGridMin"/> + 偏移）→ 内部 viewX。</summary>
+        public int DisplayColumnOffsetToInternalViewX(int displayColumnOffset)
+        {
+            displayColumnOffset = Mathf.Clamp(displayColumnOffset, 0, MatrixSize - 1);
+            if (RotationStep % 2 == 0)
+            {
+                return displayColumnOffset;
+            }
+
+            return MatrixSize - 1 - displayColumnOffset;
+        }
+
         /// <summary>体素存储索引 (sx,sz) 转为视图水平面索引 (vx,vz)，与 ViewXZToStorageXZ 互逆。</summary>
         public static Vector2Int RotateStorageToViewXZ(int storageX, int storageZ, int rotationStep)
         {
@@ -542,16 +570,18 @@ namespace LandscapeMatrix
         public Vector3 GetLocalPositionForStandCell(Vector2Int standCell)
         {
             int floorGridY = standCell.y - 1;
-            int vx = standCell.x - SliceGridMin;
+            int displayColumnOffset = standCell.x - SliceGridMin;
             int sy = floorGridY - SliceGridMin;
             int vz = SliceSampledZ;
-            if (vx < 0 || vx > 2 || sy < 0 || sy > 2)
+            if (displayColumnOffset < 0 || displayColumnOffset > 2 || sy < 0 || sy > 2)
             {
                 return new Vector3(0f, VoxelHalfExtent, 0f);
             }
 
+            int internalVx = DisplayColumnOffsetToInternalViewX(displayColumnOffset);
+
             // 脚底 XZ 取当前采样深度 vz 上体素中心，与切片 viewZ 一致（对齐 SliceSampledZ）。
-            Vector3 voxelCenter = VoxelCenterLocalFromView(vx, sy, vz);
+            Vector3 voxelCenter = VoxelCenterLocalFromView(internalVx, sy, vz);
             float feetLocalY = sy + VoxelHalfExtent;
             return new Vector3(voxelCenter.x, feetLocalY, voxelCenter.z);
         }
@@ -586,10 +616,11 @@ namespace LandscapeMatrix
 
             int floorGridY = SliceGridMin + sy;
             int standY = floorGridY + 1;
-            return new Vector2Int(SliceGridMin + bestVx, standY);
+            int displayColumnOffset = InternalViewXToDisplayColumnOffset(bestVx);
+            return new Vector2Int(SliceGridMin + displayColumnOffset, standY);
         }
 
-        /// <param name="viewX">切片平面上的列 0..2（与左侧 7×7 中心块列对应）。</param>
+        /// <param name="viewX">切片平面上的列 0..2（内部索引；与 2D 显示列在 90°/270° 时经 <see cref="InternalViewXToDisplayColumnOffset"/> 对应）。</param>
         /// <param name="storageY">体素高度层 0..2，与数据第二维一致。</param>
         /// <param name="viewZ">切片深度 0..2，与 <see cref="SliceSampledZ"/> 一致时与 2D 地形对齐。</param>
         public bool TrySampleFilledCell(int viewX, int storageY, int viewZ, out bool filled)
