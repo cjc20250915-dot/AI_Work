@@ -2,11 +2,17 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
 
 namespace LandscapeMatrix
 {
     public class MatrixController : MonoBehaviour
     {
+        /// <summary>
+        /// 保留用于旧序列化；当前逻辑为场景中始终有 3×3×3 共 27 个方块，空位仅在运行时隐藏并关闭碰撞。
+        /// </summary>
         public enum HiddenVoxelStrategy
         {
             DoNotGenerate,
@@ -75,6 +81,7 @@ namespace LandscapeMatrix
 
         [Header("Voxel Layout (Editable)")]
         public bool defaultVoxelVisible = true;
+        [Tooltip("已废弃分支差异：空位均由场景中对应 Voxel_* 隐藏处理。")]
         public HiddenVoxelStrategy hiddenVoxelStrategy = HiddenVoxelStrategy.DoNotGenerate;
         public VoxelCoord[] hiddenVoxels =
         {
@@ -101,22 +108,83 @@ namespace LandscapeMatrix
 
         private readonly List<Button> _cachedMatrixButtons = new List<Button>(8);
 
+#if UNITY_EDITOR
+        [System.NonSerialized]
+        private bool _inspectorValidationDelayQueued;
+#endif
+
         /// <summary>与 2D 采样一致的切片深度索引（视图 Z，0..2）。</summary>
         public int SliceSampledZ => Mathf.Clamp(1 - GridOffset.z, 0, 2);
 
         /// <summary>切片参考面可视化（无碰撞 Quad）。挂在矩阵控制器上，不随体素根的旋转/前后平移变化。</summary>
         private const string SlicePlaneVisualName = "SlicePlaneVisual";
 
-        private void Awake()
+        private const string MatrixVisualChildName = "MatrixVisual";
+
+        /// <summary>
+        /// 与 <see cref="Transform.Find"/> 不同：包含未激活的子物体；仅搜索直接子级。
+        /// 避免 MatrixVisual 被关掉时 Find 失败，又在 <see cref="BuildMatrixVisual"/> 里再建一套导致每运行一次多 27 方块。
+        /// </summary>
+        private static Transform FindDirectChildByName(Transform parent, string childName)
         {
-            if (visualRoot == null)
+            if (parent == null)
             {
-                Transform existingRoot = transform.Find("MatrixVisual");
-                if (existingRoot != null)
+                return null;
+            }
+
+            for (int i = 0; i < parent.childCount; i++)
+            {
+                Transform c = parent.GetChild(i);
+                if (c != null && c.name == childName)
                 {
-                    visualRoot = existingRoot;
+                    return c;
                 }
             }
+
+            return null;
+        }
+
+        /// <summary>若历史上叠了多个 MatrixVisual，只保留一个（优先保留已赋值的 <see cref="visualRoot"/>）。</summary>
+        private void DeduplicateMatrixVisualRoots()
+        {
+            var found = new List<Transform>(4);
+            for (int i = 0; i < transform.childCount; i++)
+            {
+                Transform c = transform.GetChild(i);
+                if (c != null && c.name == MatrixVisualChildName)
+                {
+                    found.Add(c);
+                }
+            }
+
+            if (found.Count == 0)
+            {
+                return;
+            }
+
+            Transform keep = visualRoot != null && found.Contains(visualRoot) ? visualRoot : found[0];
+            visualRoot = keep;
+
+            for (int i = 0; i < found.Count; i++)
+            {
+                Transform t = found[i];
+                if (t != null && t != keep)
+                {
+                    Object.DestroyImmediate(t.gameObject);
+                }
+            }
+        }
+
+        private void Awake()
+        {
+            DeduplicateMatrixVisualRoots();
+
+            if (visualRoot == null)
+            {
+                visualRoot = FindDirectChildByName(transform, MatrixVisualChildName);
+            }
+
+            DeduplicateMatrixVisualRoots();
 
             if (voxelData == null)
             {
@@ -132,8 +200,8 @@ namespace LandscapeMatrix
             }
             else
             {
-                DestroyVoxelCubeChildren();
-                CreateAllVoxelCubes();
+                EnsureVoxelGridComplete();
+                ApplyVoxelVisibilityFromData();
                 if (FindSlicePlaneVisualTransform() == null)
                 {
                     CreateSliceVisualizer();
@@ -165,35 +233,100 @@ namespace LandscapeMatrix
             {
                 NotifyStateChanged();
             }
-
-            EnsureAirWalls();
         }
 
         public void BuildMatrixVisual()
         {
             transform.position = new Vector3(10f, 0f, 0f);
-            visualRoot = new GameObject("MatrixVisual").transform;
+
+            Transform existing = FindDirectChildByName(transform, MatrixVisualChildName);
+            if (existing != null)
+            {
+                visualRoot = existing;
+                voxelData = BuildVoxelData();
+                GridOffset = ClampOffset(initialGridOffset);
+                RotationStep = initialRotationStep % 4;
+                EnsureVoxelGridComplete();
+                ApplyVoxelVisibilityFromData();
+                CreateSliceVisualizer();
+                EnsureAirWalls();
+                return;
+            }
+
+            visualRoot = new GameObject(MatrixVisualChildName).transform;
             visualRoot.SetParent(transform, false);
             voxelData = BuildVoxelData();
             GridOffset = ClampOffset(initialGridOffset);
             RotationStep = initialRotationStep % 4;
 
-            CreateAllVoxelCubes();
+            EnsureVoxelGridComplete();
+            ApplyVoxelVisibilityFromData();
 
             CreateSliceVisualizer();
             EnsureAirWalls();
         }
 
+        [ContextMenu("Landscape Matrix/Ensure 27 voxels in scene (editor)")]
+        private void ContextMenuEnsureVoxelsInScene()
+        {
+            if (visualRoot == null)
+            {
+                visualRoot = FindDirectChildByName(transform, MatrixVisualChildName);
+            }
+
+            DeduplicateMatrixVisualRoots();
+            if (visualRoot == null)
+            {
+                Debug.LogWarning("MatrixController: assign or create MatrixVisual first.");
+                return;
+            }
+
+            voxelData = BuildVoxelData();
+            EnsureVoxelGridComplete();
+            ApplyVoxelVisibilityFromData();
+        }
+
         private void OnValidate()
         {
+#if UNITY_EDITOR
+            // OnValidate 内禁止 DestroyImmediate；推迟到下一编辑器帧再跑，与 Unity 要求一致。
+            if (_inspectorValidationDelayQueued)
+            {
+                return;
+            }
+
+            _inspectorValidationDelayQueued = true;
+            EditorApplication.delayCall += ApplyInspectorValidationDeferred;
+#else
+            ApplyInspectorValidationDeferred();
+#endif
+        }
+
+        private void ApplyInspectorValidationDeferred()
+        {
+#if UNITY_EDITOR
+            _inspectorValidationDelayQueued = false;
+            if (this == null)
+            {
+                return;
+            }
+#endif
+
             voxelData = BuildVoxelData();
+            if (visualRoot == null)
+            {
+                visualRoot = FindDirectChildByName(transform, MatrixVisualChildName);
+            }
+
+            DeduplicateMatrixVisualRoots();
+
             if (visualRoot == null)
             {
                 return;
             }
 
-            DestroyVoxelCubeChildren();
-            CreateAllVoxelCubes();
+            EnsureVoxelGridComplete();
+            ApplyVoxelVisibilityFromData();
 
             Transform slice = FindSlicePlaneVisualTransform();
             if (slice != null)
@@ -213,33 +346,23 @@ namespace LandscapeMatrix
             }
         }
 
-        private void DestroyVoxelCubeChildren()
+        private static string VoxelObjectName(int x, int y, int z) => $"Voxel_{x}_{y}_{z}";
+
+        private Transform FindVoxelTransform(int x, int y, int z)
         {
             if (visualRoot == null)
             {
-                return;
+                return null;
             }
 
-            for (int i = visualRoot.childCount - 1; i >= 0; i--)
-            {
-                Transform c = visualRoot.GetChild(i);
-                if (c == null || !c.name.StartsWith("Voxel_", System.StringComparison.Ordinal))
-                {
-                    continue;
-                }
-
-                if (Application.isPlaying)
-                {
-                    Object.Destroy(c.gameObject);
-                }
-                else
-                {
-                    Object.DestroyImmediate(c.gameObject);
-                }
-            }
+            return FindDirectChildByName(visualRoot, VoxelObjectName(x, y, z));
         }
 
-        private void CreateAllVoxelCubes()
+        /// <summary>
+        /// 保证 MatrixVisual 下存在全部 27 个体素物体（编辑态写入场景；缺失则创建）。
+        /// 不删除已有物体，避免反复清空再生成。
+        /// </summary>
+        private void EnsureVoxelGridComplete()
         {
             if (visualRoot == null || voxelData == null)
             {
@@ -252,14 +375,13 @@ namespace LandscapeMatrix
                 {
                     for (int z = 0; z < MatrixSize; z++)
                     {
-                        bool isFilled = voxelData[x, y, z];
-                        if (!isFilled && hiddenVoxelStrategy == HiddenVoxelStrategy.DoNotGenerate)
+                        if (FindVoxelTransform(x, y, z) != null)
                         {
                             continue;
                         }
 
                         GameObject cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
-                        cube.name = $"Voxel_{x}_{y}_{z}";
+                        cube.name = VoxelObjectName(x, y, z);
                         cube.transform.SetParent(visualRoot, false);
                         cube.transform.localPosition = new Vector3(x - 1f, y, z - 1f);
                         cube.transform.localScale = Vector3.one * VoxelVisualSize;
@@ -270,20 +392,52 @@ namespace LandscapeMatrix
                             _ => new Color(0.62f, 0.86f, 0.56f, 0.9f)
                         };
                         cube.GetComponent<Renderer>().material.color = color;
+                        cube.SetActive(true);
+                    }
+                }
+            }
+        }
 
-                        if (!isFilled && hiddenVoxelStrategy == HiddenVoxelStrategy.GenerateDisableVisualAndCollision)
+        /// <summary>
+        /// 按 <see cref="voxelData"/> 切换体素：有体素则显示并开启碰撞，空位则隐藏物体（无渲染、无碰撞）。
+        /// </summary>
+        private void ApplyVoxelVisibilityFromData()
+        {
+            if (visualRoot == null || voxelData == null)
+            {
+                return;
+            }
+
+            for (int x = 0; x < MatrixSize; x++)
+            {
+                for (int y = 0; y < MatrixSize; y++)
+                {
+                    for (int z = 0; z < MatrixSize; z++)
+                    {
+                        Transform t = FindVoxelTransform(x, y, z);
+                        if (t == null)
                         {
-                            Renderer renderer = cube.GetComponent<Renderer>();
-                            Collider collider = cube.GetComponent<Collider>();
-                            if (renderer != null)
+                            continue;
+                        }
+
+                        bool filled = voxelData[x, y, z];
+                        GameObject go = t.gameObject;
+                        if (filled)
+                        {
+                            go.SetActive(true);
+                            if (go.TryGetComponent(out Renderer r))
                             {
-                                renderer.enabled = false;
+                                r.enabled = true;
                             }
 
-                            if (collider != null)
+                            if (go.TryGetComponent(out Collider col))
                             {
-                                collider.enabled = false;
+                                col.enabled = true;
                             }
+                        }
+                        else
+                        {
+                            go.SetActive(false);
                         }
                     }
                 }
@@ -1038,8 +1192,25 @@ namespace LandscapeMatrix
             }
         }
 
+        /// <summary>MatrixVisual 下空气墙根节点：精确名或 Unity 自动重命名 AirWalls (1) 等。</summary>
+        private static bool IsAirWallsRootName(string objectName)
+        {
+            if (string.IsNullOrEmpty(objectName))
+            {
+                return false;
+            }
+
+            if (objectName == "AirWalls")
+            {
+                return true;
+            }
+
+            return objectName.StartsWith("AirWalls (", System.StringComparison.Ordinal);
+        }
+
         /// <summary>
         /// 在体素区域四周放置无渲染盒体碰撞，防止角色从侧面掉落（随 visualRoot 旋转）。
+        /// 已存在则不销毁重建：避免 OnValidate、进出 Play 时 Destroy 未生效又 new 导致多套 AirWalls。
         /// </summary>
         private void EnsureAirWalls()
         {
@@ -1048,10 +1219,48 @@ namespace LandscapeMatrix
                 return;
             }
 
-            Transform container = visualRoot.Find("AirWalls");
-            if (container != null)
+            var roots = new List<Transform>(4);
+            for (int i = 0; i < visualRoot.childCount; i++)
             {
-                Object.Destroy(container.gameObject);
+                Transform c = visualRoot.GetChild(i);
+                if (c != null && IsAirWallsRootName(c.name))
+                {
+                    roots.Add(c);
+                }
+            }
+
+            Transform keep = null;
+            for (int i = 0; i < roots.Count; i++)
+            {
+                if (roots[i] != null && roots[i].name == "AirWalls")
+                {
+                    keep = roots[i];
+                    break;
+                }
+            }
+
+            if (keep == null && roots.Count > 0)
+            {
+                keep = roots[0];
+            }
+
+            for (int i = 0; i < roots.Count; i++)
+            {
+                Transform r = roots[i];
+                if (r != null && r != keep)
+                {
+                    Object.DestroyImmediate(r.gameObject);
+                }
+            }
+
+            if (keep != null)
+            {
+                if (keep.name != "AirWalls")
+                {
+                    keep.gameObject.name = "AirWalls";
+                }
+
+                return;
             }
 
             GameObject root = new GameObject("AirWalls");
@@ -1063,10 +1272,10 @@ namespace LandscapeMatrix
             float wallHeight = 5.5f;
             float span = gridHalf * 2f + t * 2f;
 
-            void AddWall(string name, Vector3 localCenter, Vector3 size)
+            void AddWall(string wallName, Vector3 localCenter, Vector3 size)
             {
                 GameObject wall = GameObject.CreatePrimitive(PrimitiveType.Cube);
-                wall.name = name;
+                wall.name = wallName;
                 wall.transform.SetParent(root.transform, false);
                 wall.transform.localPosition = localCenter;
                 wall.transform.localScale = size;
