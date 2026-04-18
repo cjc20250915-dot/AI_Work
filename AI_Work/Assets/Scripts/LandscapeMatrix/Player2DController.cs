@@ -53,19 +53,14 @@ namespace LandscapeMatrix
 
         private void Update()
         {
-            if (_playfield.IsPlayerDead)
-            {
-                if (Input.GetKeyDown(KeyCode.R))
-                {
-                    SceneManager.LoadScene(SceneManager.GetActiveScene().name);
-                }
-
-                return;
-            }
-
             if (Input.GetKeyDown(KeyCode.R))
             {
                 SceneManager.LoadScene(SceneManager.GetActiveScene().name);
+                return;
+            }
+
+            if (_playfield.IsPlayerDead)
+            {
                 return;
             }
 

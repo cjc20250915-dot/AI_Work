@@ -45,6 +45,8 @@ namespace LandscapeMatrix
         /// <summary>体素中心在 visualRoot 局部 X/Z 上为 -1,0,1；缩放下体素在轴上的占用区间用于命中检测（缝隙处回退到最近列）。</summary>
         private static int StorageIndexFromLocalAxis(float localCoord)
         {
+            int nearest = 1;
+            float best = float.MaxValue;
             for (int s = 0; s < MatrixSize; s++)
             {
                 float center = s - 1f;
@@ -52,13 +54,8 @@ namespace LandscapeMatrix
                 {
                     return s;
                 }
-            }
 
-            int nearest = 1;
-            float best = float.MaxValue;
-            for (int s = 0; s < MatrixSize; s++)
-            {
-                float d = Mathf.Abs(localCoord - (s - 1f));
+                float d = Mathf.Abs(localCoord - center);
                 if (d < best)
                 {
                     best = d;
@@ -107,6 +104,8 @@ namespace LandscapeMatrix
         public bool IsMatrixStateChanging { get; private set; }
 
         private readonly List<Button> _cachedMatrixButtons = new List<Button>(8);
+        private Transform _cachedSlicePlane;
+        private Camera _cachedSliceCamera;
 
 #if UNITY_EDITOR
         [System.NonSerialized]
@@ -177,14 +176,14 @@ namespace LandscapeMatrix
 
         private void Awake()
         {
-            DeduplicateMatrixVisualRoots();
-
             if (visualRoot == null)
             {
                 visualRoot = FindDirectChildByName(transform, MatrixVisualChildName);
             }
 
             DeduplicateMatrixVisualRoots();
+            _cachedSlicePlane = null;
+            _cachedSliceCamera = null;
 
             if (voxelData == null)
             {
@@ -449,79 +448,6 @@ namespace LandscapeMatrix
         {
             Vector2Int s = ViewXZToStorageXZ(viewX, viewZ, RotationStep);
             return new Vector3(s.x - 1f, viewY, s.y - 1f);
-        }
-
-        /// <summary>
-        /// 切片平面内沿 viewX 增大方向、投影到世界水平面后的单位向量；随 <see cref="RotationStep"/> 一起旋转。
-        /// 使用 0→1→2 三列差分回退，避免单段退化；不再使用 storage 的 +X 作为回退（旋转后会与切片切向不一致）。
-        /// </summary>
-        public Vector3 GetWorldSliceTangentViewX(int viewY, int viewZ)
-        {
-            if (visualRoot == null)
-            {
-                return Vector3.right;
-            }
-
-            viewY = Mathf.Clamp(viewY, 0, MatrixSize - 1);
-            viewZ = Mathf.Clamp(viewZ, 0, MatrixSize - 1);
-
-            Vector3 p0 = visualRoot.TransformPoint(VoxelCenterLocalFromView(0, viewY, viewZ));
-            Vector3 p1 = visualRoot.TransformPoint(VoxelCenterLocalFromView(1, viewY, viewZ));
-            Vector3 p2 = visualRoot.TransformPoint(VoxelCenterLocalFromView(2, viewY, viewZ));
-
-            Vector3 d01 = Vector3.ProjectOnPlane(p1 - p0, Vector3.up);
-            if (d01.sqrMagnitude > 1e-10f)
-            {
-                return d01.normalized;
-            }
-
-            Vector3 d12 = Vector3.ProjectOnPlane(p2 - p1, Vector3.up);
-            if (d12.sqrMagnitude > 1e-10f)
-            {
-                return d12.normalized;
-            }
-
-            Vector3 d02 = Vector3.ProjectOnPlane(p2 - p0, Vector3.up);
-            return d02.sqrMagnitude > 1e-10f ? d02.normalized : Vector3.right;
-        }
-
-        /// <summary>
-        /// 切片平面内沿 viewZ 增大方向、投影到世界水平面后的单位向量（与 viewX 切向共同张成切片上的行走平面投影）。
-        /// </summary>
-        public Vector3 GetWorldSliceTangentViewZ(int viewX, int viewY)
-        {
-            if (visualRoot == null)
-            {
-                return Vector3.forward;
-            }
-
-            viewX = Mathf.Clamp(viewX, 0, MatrixSize - 1);
-            viewY = Mathf.Clamp(viewY, 0, MatrixSize - 1);
-
-            Vector3 p0 = visualRoot.TransformPoint(VoxelCenterLocalFromView(viewX, viewY, 0));
-            Vector3 p1 = visualRoot.TransformPoint(VoxelCenterLocalFromView(viewX, viewY, 1));
-            Vector3 p2 = visualRoot.TransformPoint(VoxelCenterLocalFromView(viewX, viewY, 2));
-
-            Vector3 d01 = Vector3.ProjectOnPlane(p1 - p0, Vector3.up);
-            if (d01.sqrMagnitude > 1e-10f)
-            {
-                return d01.normalized;
-            }
-
-            Vector3 d12 = Vector3.ProjectOnPlane(p2 - p1, Vector3.up);
-            if (d12.sqrMagnitude > 1e-10f)
-            {
-                return d12.normalized;
-            }
-
-            Vector3 d02 = Vector3.ProjectOnPlane(p2 - p0, Vector3.up);
-            return d02.sqrMagnitude > 1e-10f ? d02.normalized : Vector3.forward;
-        }
-
-        /// <summary>同 <see cref="GetWorldSliceTangentViewX"/>。</summary>
-        public Vector3 GetWorldHorizontalAlongViewX(int viewY, int viewZ)
-        {
-            return GetWorldSliceTangentViewX(viewY, viewZ);
         }
 
         public void Initialize(MatrixSliceMapper mapper)
@@ -843,6 +769,8 @@ namespace LandscapeMatrix
                 return;
             }
 
+            _cachedSlicePlane = null;
+
             for (int i = parent.childCount - 1; i >= 0; i--)
             {
                 Transform c = parent.GetChild(i);
@@ -911,10 +839,18 @@ namespace LandscapeMatrix
                 return;
             }
 
+            _cachedSlicePlane = sliceTransform;
+
             sliceTransform.SetParent(transform, true);
             sliceTransform.localPosition = new Vector3(0f, 1f, 0f);
             sliceTransform.localScale = new Vector3(4.4f, 4.4f, 1f);
-            AlignSlicePlaneParallelToCamera(sliceTransform);
+            if (_cachedSliceCamera == null)
+            {
+                GameObject go = GameObject.Find("Camera_Right3D");
+                _cachedSliceCamera = go != null && go.TryGetComponent(out Camera c) ? c : Camera.main;
+            }
+
+            AlignSlicePlaneParallelToCamera(sliceTransform, _cachedSliceCamera);
             EnsureSlicePlaneHasNoColliders(sliceTransform.gameObject);
         }
 
@@ -953,25 +889,29 @@ namespace LandscapeMatrix
                 return;
             }
 
-            Transform slice = FindSlicePlaneVisualTransform();
-            if (slice != null)
+            if (_cachedSlicePlane == null)
             {
-                AlignSlicePlaneParallelToCamera(slice);
+                _cachedSlicePlane = FindSlicePlaneVisualTransform();
+            }
+
+            if (_cachedSliceCamera == null)
+            {
+                GameObject go = GameObject.Find("Camera_Right3D");
+                _cachedSliceCamera = go != null && go.TryGetComponent(out Camera c) ? c : Camera.main;
+            }
+
+            if (_cachedSlicePlane != null)
+            {
+                AlignSlicePlaneParallelToCamera(_cachedSlicePlane, _cachedSliceCamera);
             }
         }
 
         /// <summary>
         /// 使 Quad 在水平面内朝向相机（仅绕世界 Y），世界欧拉 X=0，避免随相机俯仰倾斜。
         /// </summary>
-        private static void AlignSlicePlaneParallelToCamera(Transform sliceTransform)
+        private static void AlignSlicePlaneParallelToCamera(Transform sliceTransform, Camera cam)
         {
-            if (sliceTransform == null)
-            {
-                return;
-            }
-
-            Camera cam = ResolveSliceReferenceCamera();
-            if (cam == null)
+            if (sliceTransform == null || cam == null)
             {
                 return;
             }
@@ -985,17 +925,6 @@ namespace LandscapeMatrix
             }
 
             sliceTransform.rotation = Quaternion.LookRotation(toCamera.normalized, Vector3.up);
-        }
-
-        private static Camera ResolveSliceReferenceCamera()
-        {
-            GameObject go = GameObject.Find("Camera_Right3D");
-            if (go != null && go.TryGetComponent(out Camera c))
-            {
-                return c;
-            }
-
-            return Camera.main;
         }
 
         private static void ConfigureSlicePlaneMaterial(Material material, Color color)
@@ -1026,6 +955,10 @@ namespace LandscapeMatrix
             if (slice != null)
             {
                 UpdateSliceVisualizerTransform(slice);
+            }
+            else
+            {
+                _cachedSlicePlane = null;
             }
 
             mapper?.ApplyMatrixState();

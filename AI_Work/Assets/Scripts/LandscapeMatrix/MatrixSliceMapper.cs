@@ -27,12 +27,7 @@ namespace LandscapeMatrix
             _matrix.Initialize(this);
         }
 
-        public CellType[,] BuildCurrentSliceMap()
-        {
-            CellType[,] cells = BuildBaseMap();
-            ApplyMatrixOpenPath(cells);
-            return cells;
-        }
+        public CellType[,] BuildCurrentSliceMap() => BuildBaseMap();
 
         public void ApplyMatrixState()
         {
@@ -121,11 +116,6 @@ namespace LandscapeMatrix
             PlaceSpawnAndGoal(cells);
 
             return cells;
-        }
-
-        private void ApplyMatrixOpenPath(CellType[,] cells)
-        {
-            // 改为纯切片驱动，不再额外“造通道”。
         }
 
         private static void PlaceSpawnAndGoal(CellType[,] cells)

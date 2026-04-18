@@ -26,6 +26,7 @@ namespace LandscapeMatrix
         private Player2DController _player2D;
         private Playfield2D _playfield;
         private float _verticalVelocity;
+        private bool _lastMatrixUiInteractable = true;
 
         private void Awake()
         {
@@ -53,6 +54,7 @@ namespace LandscapeMatrix
             }
 
             ApplyDimensionsFromMatrix();
+            _lastMatrixUiInteractable = CanManipulateMatrix();
         }
 
         public void ApplyDimensionsFromMatrix()
@@ -150,7 +152,13 @@ namespace LandscapeMatrix
             move.y = _verticalVelocity;
             _controller.Move(move * Time.deltaTime);
             ResolveOverlapPushOutOfVoxels();
-            matrix.RefreshMatrixButtonsInteractable();
+
+            bool uiOk = CanManipulateMatrix();
+            if (uiOk != _lastMatrixUiInteractable)
+            {
+                _lastMatrixUiInteractable = uiOk;
+                matrix.RefreshMatrixButtonsInteractable();
+            }
         }
 
         private static bool ShouldApplyJump()
