@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Collections.Generic;
 using System.Text;
 using UnityEngine;
@@ -129,7 +130,16 @@ namespace LandscapeMatrix
         [Header("Debug")]
         [SerializeField] private bool _enableDebugLogs = true;
 
+        [Header("Presentation Motion")]
+        [SerializeField] private bool _enablePresentationMotion = true;
+        [SerializeField, Min(0f)] private float _presentationMotionDuration = 0.22f;
+
         private Transform _goalItemVisual;
+        private Transform _presentationRoot;
+        private Coroutine _presentationMotionRoutine;
+        private Vector3 _presentationDisplayedLocalPosition;
+        private Quaternion _presentationDisplayedLocalRotation = Quaternion.identity;
+        private bool _presentationPoseInitialized;
 
         public Vector3Int GridOffset { get; private set; }
         public int RotationStep { get; private set; }
@@ -156,6 +166,7 @@ namespace LandscapeMatrix
         private const string SlicePlaneVisualName = "SlicePlaneVisual";
 
         private const string MatrixVisualChildName = "MatrixVisual";
+        private const string MatrixPresentationChildName = "MatrixPresentation";
 
         /// <summary>
         /// 与 <see cref="Transform.Find"/> 不同：包含未激活的子物体；仅搜索直接子级。
@@ -221,6 +232,8 @@ namespace LandscapeMatrix
             DeduplicateMatrixVisualRoots();
             _cachedSlicePlane = null;
             _cachedSliceCamera = null;
+            _presentationRoot = null;
+            _presentationPoseInitialized = false;
 
             if (voxelData == null)
             {
@@ -245,6 +258,8 @@ namespace LandscapeMatrix
 
                 EnsureAirWalls();
             }
+
+            EnsurePresentationVisuals();
         }
 
         private void Start()
@@ -477,6 +492,8 @@ namespace LandscapeMatrix
                     }
                 }
             }
+
+            SyncPresentationVisualsFromLogicalRoot();
         }
 
         /// <summary>视图 (viewX,viewY,viewZ) 对应体素中心在 <see cref="visualRoot"/> 局部空间中的坐标。</summary>
@@ -1083,6 +1100,7 @@ namespace LandscapeMatrix
             _goalItemVisual.localPosition = new Vector3(0f, lift, 0f);
             _goalItemVisual.localRotation = Quaternion.identity;
             _goalItemVisual.gameObject.SetActive(true);
+            SyncPresentationVisualsFromLogicalRoot();
         }
 
         /// <summary>偏好目标体素在存在且可见时用于 3D 过关物；不要求落在当前采样切层。</summary>
@@ -1555,10 +1573,13 @@ namespace LandscapeMatrix
 
         private void NotifyStateChanged()
         {
+            Vector3 targetLocalPosition = new Vector3(0f, 0f, GridOffset.z * MatrixMoveStep);
+            Quaternion targetLocalRotation = Quaternion.Euler(0f, RotationStep * 90f, 0f);
+
             if (visualRoot != null)
             {
-                visualRoot.localPosition = new Vector3(0f, 0f, GridOffset.z * MatrixMoveStep);
-                visualRoot.localRotation = Quaternion.Euler(0f, RotationStep * 90f, 0f);
+                visualRoot.localPosition = targetLocalPosition;
+                visualRoot.localRotation = targetLocalRotation;
             }
 
             Transform slice = FindSlicePlaneVisualTransform();
@@ -1581,6 +1602,10 @@ namespace LandscapeMatrix
             TryNotifyLevelClearFrom3DGoalOverlap();
             LogDebugSnapshot(_pendingDebugReason);
             _pendingDebugReason = "StateChanged";
+
+            EnsurePresentationVisuals();
+            SyncPresentationVisualsFromLogicalRoot();
+            ApplyPresentationPose(targetLocalPosition, targetLocalRotation);
         }
 
         /// <summary>矩阵操作（尤其旋转/平移）后，若 3D 目标物与玩家发生重合则判定通关。</summary>
@@ -2008,6 +2033,223 @@ namespace LandscapeMatrix
                 material.DisableKeyword("_ALPHAPREMULTIPLY_ON");
                 material.renderQueue = 3000;
             }
+        }
+
+        private void EnsurePresentationVisuals()
+        {
+            if (!Application.isPlaying || visualRoot == null)
+            {
+                return;
+            }
+
+            if (_presentationRoot == null)
+            {
+                _presentationRoot = FindDirectChildByName(transform, MatrixPresentationChildName);
+            }
+
+            if (_presentationRoot == null)
+            {
+                GameObject presentation = new GameObject(MatrixPresentationChildName);
+                _presentationRoot = presentation.transform;
+                _presentationRoot.SetParent(transform, false);
+            }
+
+            for (int x = 0; x < MatrixSize; x++)
+            {
+                for (int y = 0; y < MatrixSize; y++)
+                {
+                    for (int z = 0; z < MatrixSize; z++)
+                    {
+                        Transform logicalVoxel = FindVoxelTransform(x, y, z);
+                        if (logicalVoxel == null)
+                        {
+                            continue;
+                        }
+
+                        Transform presentationVoxel = FindDirectChildByName(_presentationRoot, VoxelObjectName(x, y, z));
+                        if (presentationVoxel == null)
+                        {
+                            GameObject visualOnly = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                            visualOnly.name = VoxelObjectName(x, y, z);
+                            presentationVoxel = visualOnly.transform;
+                            presentationVoxel.SetParent(_presentationRoot, false);
+
+                            Collider visualCollider = visualOnly.GetComponent<Collider>();
+                            if (visualCollider != null)
+                            {
+                                visualCollider.enabled = false;
+                                Object.Destroy(visualCollider);
+                            }
+                        }
+
+                        CopyRendererVisualState(logicalVoxel, presentationVoxel);
+                    }
+                }
+            }
+
+            SetLogicalVoxelRenderersVisible(!_enablePresentationMotion);
+            _presentationRoot.gameObject.SetActive(_enablePresentationMotion);
+        }
+
+        private void SyncPresentationVisualsFromLogicalRoot()
+        {
+            if (!Application.isPlaying || !_enablePresentationMotion || visualRoot == null)
+            {
+                return;
+            }
+
+            EnsurePresentationVisuals();
+            if (_presentationRoot == null)
+            {
+                return;
+            }
+
+            for (int x = 0; x < MatrixSize; x++)
+            {
+                for (int y = 0; y < MatrixSize; y++)
+                {
+                    for (int z = 0; z < MatrixSize; z++)
+                    {
+                        Transform logicalVoxel = FindVoxelTransform(x, y, z);
+                        Transform presentationVoxel = FindDirectChildByName(_presentationRoot, VoxelObjectName(x, y, z));
+                        if (logicalVoxel == null || presentationVoxel == null)
+                        {
+                            continue;
+                        }
+
+                        CopyRendererVisualState(logicalVoxel, presentationVoxel);
+                    }
+                }
+            }
+        }
+
+        private static void CopyRendererVisualState(Transform source, Transform target)
+        {
+            if (source == null || target == null)
+            {
+                return;
+            }
+
+            target.gameObject.SetActive(source.gameObject.activeSelf);
+            target.localPosition = source.localPosition;
+            target.localRotation = source.localRotation;
+            target.localScale = source.localScale;
+
+            Renderer sourceRenderer = source.GetComponent<Renderer>();
+            Renderer targetRenderer = target.GetComponent<Renderer>();
+            if (sourceRenderer == null || targetRenderer == null)
+            {
+                return;
+            }
+
+            targetRenderer.sharedMaterials = sourceRenderer.sharedMaterials;
+            targetRenderer.enabled = source.gameObject.activeSelf;
+
+            MaterialPropertyBlock block = new MaterialPropertyBlock();
+            sourceRenderer.GetPropertyBlock(block);
+            targetRenderer.SetPropertyBlock(block);
+        }
+
+        private void SetLogicalVoxelRenderersVisible(bool visible)
+        {
+            if (visualRoot == null)
+            {
+                return;
+            }
+
+            for (int x = 0; x < MatrixSize; x++)
+            {
+                for (int y = 0; y < MatrixSize; y++)
+                {
+                    for (int z = 0; z < MatrixSize; z++)
+                    {
+                        Transform logicalVoxel = FindVoxelTransform(x, y, z);
+                        if (logicalVoxel == null || !logicalVoxel.TryGetComponent(out Renderer renderer))
+                        {
+                            continue;
+                        }
+
+                        renderer.enabled = visible && logicalVoxel.gameObject.activeSelf;
+                    }
+                }
+            }
+        }
+
+        private void ApplyPresentationPose(Vector3 targetLocalPosition, Quaternion targetLocalRotation)
+        {
+            if (!Application.isPlaying || !_enablePresentationMotion || _presentationRoot == null)
+            {
+                ApplyPresentationPoseImmediately(targetLocalPosition, targetLocalRotation);
+                return;
+            }
+
+            if (!_presentationPoseInitialized || _presentationMotionDuration <= 0.001f)
+            {
+                ApplyPresentationPoseImmediately(targetLocalPosition, targetLocalRotation);
+                return;
+            }
+
+            Vector3 startLocalPosition = _presentationRoot.localPosition;
+            Quaternion startLocalRotation = _presentationRoot.localRotation;
+            if (_presentationMotionRoutine != null)
+            {
+                StopCoroutine(_presentationMotionRoutine);
+            }
+
+            _presentationMotionRoutine = StartCoroutine(AnimatePresentationPose(
+                startLocalPosition,
+                startLocalRotation,
+                targetLocalPosition,
+                targetLocalRotation));
+        }
+
+        private void ApplyPresentationPoseImmediately(Vector3 localPosition, Quaternion localRotation)
+        {
+            if (_presentationRoot == null)
+            {
+                return;
+            }
+
+            if (_presentationMotionRoutine != null)
+            {
+                StopCoroutine(_presentationMotionRoutine);
+                _presentationMotionRoutine = null;
+            }
+
+            _presentationRoot.localPosition = localPosition;
+            _presentationRoot.localRotation = localRotation;
+            _presentationDisplayedLocalPosition = localPosition;
+            _presentationDisplayedLocalRotation = localRotation;
+            _presentationPoseInitialized = true;
+        }
+
+        private IEnumerator AnimatePresentationPose(
+            Vector3 startLocalPosition,
+            Quaternion startLocalRotation,
+            Vector3 targetLocalPosition,
+            Quaternion targetLocalRotation)
+        {
+            float elapsed = 0f;
+            while (elapsed < _presentationMotionDuration)
+            {
+                elapsed += Time.deltaTime;
+                float t = Mathf.Clamp01(elapsed / _presentationMotionDuration);
+                float eased = Mathf.SmoothStep(0f, 1f, t);
+                Vector3 currentLocalPosition = Vector3.LerpUnclamped(startLocalPosition, targetLocalPosition, eased);
+                Quaternion currentLocalRotation = Quaternion.Slerp(startLocalRotation, targetLocalRotation, eased);
+
+                _presentationRoot.localPosition = currentLocalPosition;
+                _presentationRoot.localRotation = currentLocalRotation;
+                _presentationDisplayedLocalPosition = currentLocalPosition;
+                _presentationDisplayedLocalRotation = currentLocalRotation;
+                yield return null;
+            }
+
+            _presentationRoot.localPosition = targetLocalPosition;
+            _presentationRoot.localRotation = targetLocalRotation;
+            _presentationDisplayedLocalPosition = targetLocalPosition;
+            _presentationDisplayedLocalRotation = targetLocalRotation;
+            _presentationMotionRoutine = null;
         }
     }
 }
