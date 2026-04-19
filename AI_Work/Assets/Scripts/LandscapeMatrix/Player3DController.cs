@@ -28,6 +28,8 @@ namespace LandscapeMatrix
         private float _verticalVelocity;
         private bool _lastMatrixUiInteractable = true;
 
+        private static readonly Collider[] OverlapScratch = new Collider[32];
+
         private void Awake()
         {
             _controller = GetComponent<CharacterController>();
@@ -195,16 +197,18 @@ namespace LandscapeMatrix
         private bool IsOverlappingMatrixVoxelGeometry()
         {
             Bounds b = _controller.bounds;
-            Collider[] hits = Physics.OverlapBox(
+            Vector3 halfExtents = b.extents * 0.92f;
+            int count = Physics.OverlapBoxNonAlloc(
                 b.center,
-                b.extents * 0.92f,
+                halfExtents,
+                OverlapScratch,
                 transform.rotation,
                 Physics.DefaultRaycastLayers,
                 QueryTriggerInteraction.Ignore);
 
-            for (int i = 0; i < hits.Length; i++)
+            for (int i = 0; i < count; i++)
             {
-                Collider h = hits[i];
+                Collider h = OverlapScratch[i];
                 if (h == null || h.transform.IsChildOf(transform))
                 {
                     continue;

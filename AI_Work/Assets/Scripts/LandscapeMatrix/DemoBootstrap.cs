@@ -50,7 +50,6 @@ namespace LandscapeMatrix
 
             GameObject mapperObject = new GameObject("FixedSliceMapper");
             MatrixSliceMapper mapper = mapperObject.AddComponent<MatrixSliceMapper>();
-            playfield2D.Initialize(mapper);
             mapper.Initialize(playfield2D, matrixController);
             matrixController.BindPlayer(playfield2D.GetPlayerController());
             CreateCanvas(matrixController);
@@ -94,8 +93,9 @@ namespace LandscapeMatrix
             cameraComponent.clearFlags = CameraClearFlags.SolidColor;
             cameraComponent.backgroundColor = new Color(0.08f, 0.08f, 0.08f);
             // 侧视：相机沿 Z 轴观察 X/Y 平面，角色在方块“外侧”移动。
-            cameraObject.transform.position = new Vector3(3f, 3.2f, -12f);
-            cameraObject.transform.LookAt(new Vector3(3f, 3f, 0f));
+            // 与 SliceBoardWorldOrigin=0 时 3×4 格网中心约 (1, 1.5) 对齐（旧 7×7 时代为 (3,3)）。
+            cameraObject.transform.position = new Vector3(1f, 2.2f, -12f);
+            cameraObject.transform.LookAt(new Vector3(1f, 1.5f, 0f));
         }
 
         private static void CreateRightCamera()

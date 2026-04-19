@@ -13,6 +13,7 @@ namespace LandscapeMatrix
 
         private Playfield2D _playfield;
         private Vector2Int _cell;
+        private bool _cellAssigned;
         private float _moveCooldown;
 
         public void Initialize(Playfield2D playfield, Vector2Int spawnCell)
@@ -23,6 +24,12 @@ namespace LandscapeMatrix
 
         public void SetCell(Vector2Int cell)
         {
+            if (_cellAssigned && _cell == cell)
+            {
+                return;
+            }
+
+            _cellAssigned = true;
             _cell = cell;
             transform.position = _playfield.GetStandWorldPosition(_cell);
             OnCellChanged?.Invoke(_cell);

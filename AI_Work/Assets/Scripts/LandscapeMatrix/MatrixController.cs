@@ -30,11 +30,29 @@ namespace LandscapeMatrix
         public const int MatrixHalfRange = 1;
         public const float MatrixMoveStep = 1f;
         public const int MatrixSize = 3;
-        /// <summary>左侧 7x7 中与 3x3 切片对齐的起始格索引（与 MatrixSliceMapper 一致）。</summary>
-        public const int SliceGridMin = 2;
+
+        /// <summary>左侧 2D 切面地图宽度（列，对应矩阵 viewX / 显示列 0..2）。</summary>
+        public const int SliceMapWidth = 3;
+
+        /// <summary>左侧 2D 切面地图高度：三层地块行 (y=0..2) + 一层可站立空气格 (y=3)。</summary>
+        public const int SliceMapHeight = 4;
+
+        /// <summary>地块格坐标原点；与 3×3 切面列/层对应关系为 worldX = 偏移、worldY = 体素层 viewY。</summary>
+        public const int SliceGridMin = 0;
+
+        /// <summary>左屏 2D 地图格 (0,0) 地块中心在世界坐标中的原点；与 <see cref="SliceMapWidth"/>×<see cref="SliceMapHeight"/> 一致，不再使用旧 7×7 嵌套偏移。</summary>
+        public const float SliceBoardWorldOriginX = 0f;
+
+        public const float SliceBoardWorldOriginY = 0f;
 
         /// <summary>体素与 BuildMatrixVisual 中静态方块缩放一致。</summary>
         public const float VoxelVisualSize = 0.85f;
+
+        /// <summary>默认体素色；仅出生/目标格由 <see cref="RefreshVoxelColorsFromSliceMap"/> 上色。</summary>
+        private static readonly Color VoxelNeutralColor = new Color(0.78f, 0.78f, 0.78f, 1f);
+
+        private static readonly Color VoxelSpawnHighlightColor = new Color(0.25f, 0.5f, 1f, 1f);
+        private static readonly Color VoxelGoalHighlightColor = new Color(0.16f, 0.84f, 0.35f, 1f);
 
         /// <summary>3D 玩家胶囊高度/视觉，略小于 <see cref="VoxelVisualSize"/>，与方块比例协调。</summary>
         public const float Player3DHeight = 0.68f;
@@ -96,6 +114,8 @@ namespace LandscapeMatrix
         public bool[,,] voxelData;
         public Player2DController boundPlayer;
         public Player3DController player3D;
+
+        private Transform _goalItemVisual;
 
         public Vector3Int GridOffset { get; private set; }
         public int RotationStep { get; private set; }
@@ -232,6 +252,8 @@ namespace LandscapeMatrix
             {
                 NotifyStateChanged();
             }
+
+            EnsureSliceCameraCached();
         }
 
         public void BuildMatrixVisual()
@@ -384,13 +406,7 @@ namespace LandscapeMatrix
                         cube.transform.SetParent(visualRoot, false);
                         cube.transform.localPosition = new Vector3(x - 1f, y, z - 1f);
                         cube.transform.localScale = Vector3.one * VoxelVisualSize;
-                        Color color = y switch
-                        {
-                            0 => new Color(0.48f, 0.72f, 0.95f, 0.9f),
-                            1 => new Color(0.9f, 0.62f, 0.26f, 0.9f),
-                            _ => new Color(0.62f, 0.86f, 0.56f, 0.9f)
-                        };
-                        cube.GetComponent<Renderer>().material.color = color;
+                        LandscapeMatrixRendererColors.SetColor(cube.GetComponent<Renderer>(), VoxelNeutralColor);
                         cube.SetActive(true);
                     }
                 }
@@ -469,9 +485,10 @@ namespace LandscapeMatrix
             if (player3D != null)
             {
                 player3D.ApplyDimensionsFromMatrix();
-                player3D.SnapToStandCell(boundPlayer.GetCurrentCell());
             }
 
+            // 先刷新矩阵/切面地图（含出生点解析与 2D 落位），再根据最终 GetCurrentCell 吸附 3D；
+            // 若在 NotifyStateChanged 之前 Snap，会与 RefreshMap 中 ResolveAfterTerrainChange 冲突，导致 2D/3D 错位。
             NotifyStateChanged();
         }
 
@@ -609,7 +626,7 @@ namespace LandscapeMatrix
 
         /// <summary>
         /// 内部 viewX（与 <see cref="TrySampleFilledCell"/> / <see cref="VoxelCenterLocalFromView"/> 一致，0..2）→
-        /// 左侧 7×7 中心 3×3 上的列偏移 0..2。与世界 +X（两视角水平方向）同向递增。
+        /// 左侧切面地图上的列偏移 0..2。与世界 +X（两视角水平方向）同向递增。
         /// 90°/270° 时列在水平面上与世界 X 反向，需镜像，否则会与 3D 画面左右相对 180°。
         /// </summary>
         public int InternalViewXToDisplayColumnOffset(int internalViewX)
@@ -623,7 +640,7 @@ namespace LandscapeMatrix
             return MatrixSize - 1 - internalViewX;
         }
 
-        /// <summary>显示列偏移 0..2（网格 x = <see cref="SliceGridMin"/> + 偏移）→ 内部 viewX。</summary>
+        /// <summary>显示列偏移 0..2（网格 x = <see cref="SliceGridMin"/> + 偏移，即 0..2）→ 内部 viewX。</summary>
         public int DisplayColumnOffsetToInternalViewX(int displayColumnOffset)
         {
             displayColumnOffset = Mathf.Clamp(displayColumnOffset, 0, MatrixSize - 1);
@@ -633,6 +650,378 @@ namespace LandscapeMatrix
             }
 
             return MatrixSize - 1 - displayColumnOffset;
+        }
+
+        /// <summary>
+        /// 切面地图内地块格 (worldX, worldY)（与 <see cref="CellType"/> 地图一致；地块层 y 为 0..2）对应体素在顶面无遮挡：
+        /// 该列最上层体素之上不再有填充体素（顶层 y=2 视为满足）。
+        /// </summary>
+        public bool SliceBlockHasNoVoxelAbove(int worldX, int worldY)
+        {
+            int displayColumnOffset = worldX - SliceGridMin;
+            int viewY = worldY - SliceGridMin;
+            if (displayColumnOffset < 0 || displayColumnOffset > 2 || viewY < 0 || viewY > 2)
+            {
+                return false;
+            }
+
+            if (voxelData == null)
+            {
+                return true;
+            }
+
+            int internalVx = DisplayColumnOffsetToInternalViewX(displayColumnOffset);
+            int vz = SliceSampledZ;
+            Vector2Int storageXZ = ViewXZToStorageXZ(internalVx, vz, RotationStep);
+            int sx = storageXZ.x;
+            int sz = storageXZ.y;
+            if (sx < 0 || sx >= MatrixSize || sz < 0 || sz >= MatrixSize)
+            {
+                return false;
+            }
+
+            if (viewY >= MatrixSize - 1)
+            {
+                return true;
+            }
+
+            return !voxelData[sx, viewY + 1, sz];
+        }
+
+        /// <summary>
+        /// 将切面内的地块格（与 2D 地图块坐标一致）映射到体素存储索引 (sx,sy,sz)。
+        /// </summary>
+        public bool TryGetStorageForSliceBlockCell(int worldX, int worldY, out int sx, out int sy, out int sz)
+        {
+            sx = sy = sz = 0;
+            int displayColumnOffset = worldX - SliceGridMin;
+            int viewY = worldY - SliceGridMin;
+            if (displayColumnOffset < 0 || displayColumnOffset > 2 || viewY < 0 || viewY > 2)
+            {
+                return false;
+            }
+
+            int internalVx = DisplayColumnOffsetToInternalViewX(displayColumnOffset);
+            int vz = SliceSampledZ;
+            Vector2Int storageXZ = ViewXZToStorageXZ(internalVx, vz, RotationStep);
+            sx = storageXZ.x;
+            sy = viewY;
+            sz = storageXZ.y;
+            return true;
+        }
+
+        /// <summary>
+        /// 当前采样切片上的地块格 (worldX, worldY)（y 为地块层 0..2）是否与 3D 偏好出生/目标体素重合且该体素有实体；
+        /// 与 <see cref="RefreshVoxelColorsFromSliceMap"/> 中偏好高亮一致，供左屏贴色。
+        /// </summary>
+        public bool TryGetSliceBlockTint(int worldX, int worldY, out bool spawnTint, out bool goalTint)
+        {
+            spawnTint = false;
+            goalTint = false;
+            if (mapper == null || voxelData == null)
+            {
+                return false;
+            }
+
+            if (worldY < SliceGridMin || worldY > SliceGridMin + 2)
+            {
+                return false;
+            }
+
+            if (!TryGetStorageForSliceBlockCell(worldX, worldY, out int sx, out int sy, out int sz))
+            {
+                return false;
+            }
+
+            if (!voxelData[sx, sy, sz])
+            {
+                return false;
+            }
+
+            Vector3Int ps = mapper.preferredSpawnVoxel;
+            Vector3Int pg = mapper.preferredGoalVoxel;
+            if (sx == pg.x && sy == pg.y && sz == pg.z)
+            {
+                goalTint = true;
+            }
+            else if (sx == ps.x && sy == ps.y && sz == ps.z)
+            {
+                spawnTint = true;
+            }
+
+            return spawnTint || goalTint;
+        }
+
+        /// <summary>
+        /// 3D 矩阵体素存储坐标 (sx,sy,sz)（与场景中 <c>Voxel_x_y_z</c> 一致）→ 当前旋转与切片深度下左屏地块格 (worldX, worldY)。
+        /// 仅当该体素处于当前可见切片（viewZ 与 <see cref="SliceSampledZ"/> 一致）时可映射。
+        /// </summary>
+        public bool TryStorageToSliceBlockCell(int sx, int sy, int sz, out Vector2Int blockCell)
+        {
+            blockCell = default;
+            if (sx < 0 || sx >= MatrixSize || sy < 0 || sy >= MatrixSize || sz < 0 || sz >= MatrixSize)
+            {
+                return false;
+            }
+
+            Vector2Int viewXZ = RotateStorageToViewXZ(sx, sz, RotationStep);
+            int viewX = viewXZ.x;
+            int viewZ = viewXZ.y;
+            if (viewZ != SliceSampledZ)
+            {
+                return false;
+            }
+
+            int displayColumnOffset = InternalViewXToDisplayColumnOffset(viewX);
+            int worldX = SliceGridMin + displayColumnOffset;
+            int worldY = SliceGridMin + sy;
+            blockCell = new Vector2Int(worldX, worldY);
+            return true;
+        }
+
+        /// <summary>
+        /// 体素仅用中性灰；出生/目标高亮优先使用 <see cref="MatrixSliceMapper"/> 的偏好体素（随 visualRoot 旋转、平移），
+        /// 与当前切面地图格子解耦；仅当偏好无效时再按切片地图回退。
+        /// </summary>
+        public void RefreshVoxelColorsFromSliceMap(CellType[,] cells)
+        {
+            if (visualRoot == null || voxelData == null)
+            {
+                return;
+            }
+
+            for (int x = 0; x < MatrixSize; x++)
+            {
+                for (int y = 0; y < MatrixSize; y++)
+                {
+                    for (int z = 0; z < MatrixSize; z++)
+                    {
+                        if (!voxelData[x, y, z])
+                        {
+                            continue;
+                        }
+
+                        Transform t = FindVoxelTransform(x, y, z);
+                        if (t == null)
+                        {
+                            continue;
+                        }
+
+                        SetVoxelRendererColor(t, VoxelNeutralColor);
+                    }
+                }
+            }
+
+            bool spawnFromPreferred = false;
+            bool goalFromPreferred = false;
+            Vector3Int preferredSpawn = Vector3Int.zero;
+            Vector3Int preferredGoal = Vector3Int.zero;
+            if (mapper != null)
+            {
+                preferredSpawn = mapper.preferredSpawnVoxel;
+                if (TryHighlightVoxelStorage(preferredSpawn.x, preferredSpawn.y, preferredSpawn.z, VoxelSpawnHighlightColor))
+                {
+                    spawnFromPreferred = true;
+                }
+
+                preferredGoal = mapper.preferredGoalVoxel;
+                if (TryHighlightVoxelStorage(preferredGoal.x, preferredGoal.y, preferredGoal.z, VoxelGoalHighlightColor))
+                {
+                    goalFromPreferred = true;
+                }
+
+                if (spawnFromPreferred && goalFromPreferred &&
+                    preferredSpawn.x == preferredGoal.x && preferredSpawn.y == preferredGoal.y && preferredSpawn.z == preferredGoal.z)
+                {
+                    Transform one = FindVoxelTransform(preferredGoal.x, preferredGoal.y, preferredGoal.z);
+                    if (one != null && one.gameObject.activeInHierarchy)
+                    {
+                        SetVoxelRendererColor(one, VoxelGoalHighlightColor);
+                    }
+                }
+            }
+
+            int spawnX = -1;
+            int spawnY = -1;
+            int goalX = -1;
+            int goalY = -1;
+            for (int x = 0; x < SliceMapWidth; x++)
+            {
+                for (int y = 0; y < SliceMapHeight; y++)
+                {
+                    CellType c = cells[x, y];
+                    if (c == CellType.Spawn)
+                    {
+                        spawnX = x;
+                        spawnY = y;
+                    }
+                    else if (c == CellType.Goal)
+                    {
+                        goalX = x;
+                        goalY = y;
+                    }
+                }
+            }
+
+            if (!spawnFromPreferred && spawnX >= 0 && TryGetStorageForSliceBlockCell(spawnX, spawnY, out int ssx, out int ssy, out int ssz))
+            {
+                Transform st = FindVoxelTransform(ssx, ssy, ssz);
+                if (st != null && st.gameObject.activeInHierarchy)
+                {
+                    SetVoxelRendererColor(st, VoxelSpawnHighlightColor);
+                }
+            }
+
+            if (!goalFromPreferred && goalX >= 0 && TryGetStorageForSliceBlockCell(goalX, goalY, out int gsx, out int gsy, out int gsz))
+            {
+                Transform gt = FindVoxelTransform(gsx, gsy, gsz);
+                if (gt != null && gt.gameObject.activeInHierarchy)
+                {
+                    SetVoxelRendererColor(gt, VoxelGoalHighlightColor);
+                }
+            }
+        }
+
+        private bool TryHighlightVoxelStorage(int sx, int sy, int sz, Color color)
+        {
+            if (sx < 0 || sx >= MatrixSize || sy < 0 || sy >= MatrixSize || sz < 0 || sz >= MatrixSize)
+            {
+                return false;
+            }
+
+            if (!voxelData[sx, sy, sz])
+            {
+                return false;
+            }
+
+            Transform t = FindVoxelTransform(sx, sy, sz);
+            if (t == null || !t.gameObject.activeInHierarchy)
+            {
+                return false;
+            }
+
+            SetVoxelRendererColor(t, color);
+            return true;
+        }
+
+        private static void SetVoxelRendererColor(Transform voxelTransform, Color color)
+        {
+            if (voxelTransform == null)
+            {
+                return;
+            }
+
+            Renderer renderer = voxelTransform.GetComponent<Renderer>();
+            LandscapeMatrixRendererColors.SetColor(renderer, color);
+        }
+
+        /// <summary>
+        /// 在代表 <see cref="CellType.Goal"/> 的体素顶面上放置过关物品；挂在体素下以随矩阵旋转、平移。
+        /// </summary>
+        public void RefreshGoalItemFromSliceMap(CellType[,] cells)
+        {
+            EnsureGoalItemVisual();
+            if (_goalItemVisual == null)
+            {
+                return;
+            }
+
+            int vsx = -1;
+            int vsy = -1;
+            int vsz = -1;
+            if (mapper != null &&
+                TryGetGoalStorageFromPreferredVoxel(mapper.preferredGoalVoxel.x, mapper.preferredGoalVoxel.y, mapper.preferredGoalVoxel.z, out vsx, out vsy, out vsz))
+            {
+                // 已由偏好体素解析
+            }
+            else
+            {
+                int goalX = -1;
+                int goalY = -1;
+                bool foundGoal = false;
+                for (int x = 0; x < SliceMapWidth && !foundGoal; x++)
+                {
+                    for (int y = 0; y < SliceMapHeight; y++)
+                    {
+                        if (cells[x, y] == CellType.Goal)
+                        {
+                            goalX = x;
+                            goalY = y;
+                            foundGoal = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (goalX < 0 || !TryGetStorageForSliceBlockCell(goalX, goalY, out vsx, out vsy, out vsz))
+                {
+                    _goalItemVisual.gameObject.SetActive(false);
+                    _goalItemVisual.SetParent(transform, false);
+                    return;
+                }
+            }
+
+            Transform voxel = FindVoxelTransform(vsx, vsy, vsz);
+            if (voxel == null || !voxel.gameObject.activeInHierarchy)
+            {
+                _goalItemVisual.gameObject.SetActive(false);
+                _goalItemVisual.SetParent(transform, false);
+                return;
+            }
+
+            _goalItemVisual.SetParent(voxel, false);
+            float sphereHalfExtent = VoxelVisualSize * 0.32f * 0.5f;
+            float lift = VoxelHalfExtent + sphereHalfExtent + 0.02f;
+            _goalItemVisual.localPosition = new Vector3(0f, lift, 0f);
+            _goalItemVisual.localRotation = Quaternion.identity;
+            _goalItemVisual.gameObject.SetActive(true);
+        }
+
+        /// <summary>偏好目标体素在存在且可见时用于 3D 过关物；不要求落在当前采样切层。</summary>
+        private bool TryGetGoalStorageFromPreferredVoxel(int sx, int sy, int sz, out int ox, out int oy, out int oz)
+        {
+            ox = oy = oz = 0;
+            if (voxelData == null || sx < 0 || sx >= MatrixSize || sy < 0 || sy >= MatrixSize || sz < 0 || sz >= MatrixSize)
+            {
+                return false;
+            }
+
+            if (!voxelData[sx, sy, sz])
+            {
+                return false;
+            }
+
+            ox = sx;
+            oy = sy;
+            oz = sz;
+            return true;
+        }
+
+        private void EnsureGoalItemVisual()
+        {
+            if (_goalItemVisual != null)
+            {
+                return;
+            }
+
+            const string goalName = "GoalItem3D";
+            Transform existing = transform.Find(goalName);
+            if (existing != null)
+            {
+                _goalItemVisual = existing;
+                return;
+            }
+
+            GameObject sphere = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            sphere.name = goalName;
+            Object.Destroy(sphere.GetComponent<Collider>());
+            Renderer renderer = sphere.GetComponent<Renderer>();
+            LandscapeMatrixRendererColors.SetColor(renderer, new Color(0.2f, 0.92f, 0.55f, 1f));
+
+            sphere.transform.SetParent(transform, false);
+            sphere.transform.localScale = Vector3.one * (VoxelVisualSize * 0.32f);
+            _goalItemVisual = sphere.transform;
+            sphere.SetActive(false);
         }
 
         /// <summary>体素存储索引 (sx,sz) 转为视图水平面索引 (vx,vz)，与 ViewXZToStorageXZ 互逆。</summary>
@@ -821,9 +1210,11 @@ namespace LandscapeMatrix
             EnsureSlicePlaneHasNoColliders(quad);
 
             Renderer renderer = quad.GetComponent<Renderer>();
-            if (renderer != null)
+            if (renderer != null && renderer.sharedMaterial != null)
             {
-                ConfigureSlicePlaneMaterial(renderer.material, new Color(0.95f, 0.2f, 0.2f, 0.16f));
+                Material sliceMat = new Material(renderer.sharedMaterial);
+                ConfigureSlicePlaneMaterial(sliceMat, new Color(0.95f, 0.2f, 0.2f, 0.16f));
+                renderer.sharedMaterial = sliceMat;
             }
 
             UpdateSliceVisualizerTransform(quad.transform);
@@ -844,11 +1235,7 @@ namespace LandscapeMatrix
             sliceTransform.SetParent(transform, true);
             sliceTransform.localPosition = new Vector3(0f, 1f, 0f);
             sliceTransform.localScale = new Vector3(4.4f, 4.4f, 1f);
-            if (_cachedSliceCamera == null)
-            {
-                GameObject go = GameObject.Find("Camera_Right3D");
-                _cachedSliceCamera = go != null && go.TryGetComponent(out Camera c) ? c : Camera.main;
-            }
+            EnsureSliceCameraCached();
 
             AlignSlicePlaneParallelToCamera(sliceTransform, _cachedSliceCamera);
             EnsureSlicePlaneHasNoColliders(sliceTransform.gameObject);
@@ -894,16 +1281,36 @@ namespace LandscapeMatrix
                 _cachedSlicePlane = FindSlicePlaneVisualTransform();
             }
 
-            if (_cachedSliceCamera == null)
+            EnsureSliceCameraCached();
+
+            if (_cachedSlicePlane == null || _cachedSliceCamera == null)
             {
-                GameObject go = GameObject.Find("Camera_Right3D");
-                _cachedSliceCamera = go != null && go.TryGetComponent(out Camera c) ? c : Camera.main;
+                return;
             }
 
-            if (_cachedSlicePlane != null)
+            // 仅当矩阵根、切面或参考相机位姿变化时重算朝向，避免每帧写 rotation。
+            Transform camTr = _cachedSliceCamera.transform;
+            Transform sliceTr = _cachedSlicePlane;
+            if (!camTr.hasChanged && !transform.hasChanged && !sliceTr.hasChanged)
             {
-                AlignSlicePlaneParallelToCamera(_cachedSlicePlane, _cachedSliceCamera);
+                return;
             }
+
+            camTr.hasChanged = false;
+            transform.hasChanged = false;
+            sliceTr.hasChanged = false;
+            AlignSlicePlaneParallelToCamera(_cachedSlicePlane, _cachedSliceCamera);
+        }
+
+        private void EnsureSliceCameraCached()
+        {
+            if (_cachedSliceCamera != null)
+            {
+                return;
+            }
+
+            GameObject go = GameObject.Find("Camera_Right3D");
+            _cachedSliceCamera = go != null && go.TryGetComponent(out Camera c) ? c : Camera.main;
         }
 
         /// <summary>
@@ -943,6 +1350,12 @@ namespace LandscapeMatrix
             }
         }
 
+        /// <summary>矩阵偏移/旋转变化或外部（如 Mapper 偏好体素）修改后，统一刷新切面、体素色与 3D 目标物。</summary>
+        public void NotifyMatrixStateChanged()
+        {
+            NotifyStateChanged();
+        }
+
         private void NotifyStateChanged()
         {
             if (visualRoot != null)
@@ -962,6 +1375,11 @@ namespace LandscapeMatrix
             }
 
             mapper?.ApplyMatrixState();
+
+            if (boundPlayer != null && player3D != null && boundPlayer.ExternalDrive)
+            {
+                player3D.SnapToStandCell(boundPlayer.GetCurrentCell());
+            }
         }
 
         private bool[,,] BuildVoxelData()
@@ -1119,10 +1537,7 @@ namespace LandscapeMatrix
             cap.transform.localScale = new Vector3(R / 0.5f, H * 0.5f, R / 0.5f);
             Object.Destroy(cap.GetComponent<Collider>());
             Renderer renderer = cap.GetComponent<Renderer>();
-            if (renderer != null)
-            {
-                renderer.material.color = new Color(1f, 0.9f, 0.25f, 1f);
-            }
+            LandscapeMatrixRendererColors.SetColor(renderer, new Color(1f, 0.9f, 0.25f, 1f));
         }
 
         /// <summary>MatrixVisual 下空气墙根节点：精确名或 Unity 自动重命名 AirWalls (1) 等。</summary>
