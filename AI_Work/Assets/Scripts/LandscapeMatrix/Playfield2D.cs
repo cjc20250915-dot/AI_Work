@@ -29,6 +29,7 @@ namespace LandscapeMatrix
         private Transform _goalItem2D;
         private bool _initialized;
         private int _lockedColumnX = SliceMinX;
+        private bool _playerVisible = true;
         public bool IsPlayerDead { get; private set; }
 
         public void Initialize(MatrixSliceMapper mapper)
@@ -245,7 +246,8 @@ namespace LandscapeMatrix
         private static readonly Color TileGoalTintColor = new Color(0.16f, 0.84f, 0.35f, 1f);
 
         /// <summary>
-        /// 实体格默认中性灰；仅当该地块在当前切片上对应 3D 已高亮的出生/目标体素时，才使用蓝/绿（与右侧体素一致）。
+        /// 左屏地块默认显示当前固定切片覆盖到的实体方块；
+        /// 仅当出生/目标偏好体素当前确实落入切片范围时，才将对应方块染为蓝/绿。
         /// </summary>
         private void PaintTile(GameObject tile, int gridX, int gridY, CellType cellType)
         {
@@ -268,21 +270,12 @@ namespace LandscapeMatrix
             }
 
             tile.SetActive(true);
+
             Color color = TileNeutralColor;
-            if (gridY >= MatrixController.SliceGridMin && gridY <= MatrixController.SliceGridMin + 2)
+            MatrixController matrix = _mapper != null ? _mapper.GetMatrixController() : null;
+            if (matrix != null && matrix.TryGetSliceBlockTint(gridX, gridY, out bool spawnTint, out bool goalTint))
             {
-                MatrixController matrix = _mapper != null ? _mapper.GetMatrixController() : null;
-                if (matrix != null && matrix.TryGetSliceBlockTint(gridX, gridY, out bool spawnTint, out bool goalTint))
-                {
-                    if (goalTint)
-                    {
-                        color = TileGoalTintColor;
-                    }
-                    else if (spawnTint)
-                    {
-                        color = TileSpawnTintColor;
-                    }
-                }
+                color = goalTint ? TileGoalTintColor : TileSpawnTintColor;
             }
 
             LandscapeMatrixRendererColors.SetColor(renderer, color);
@@ -330,24 +323,14 @@ namespace LandscapeMatrix
                 return;
             }
 
-            if (_goalCell.x < 0 || _goalCell.y < 0)
-            {
-                _goalItem2D.gameObject.SetActive(false);
-                return;
-            }
-
             MatrixController matrix = _mapper != null ? _mapper.GetMatrixController() : null;
-            if (matrix == null ||
-                _goalCell.y < MatrixController.SliceGridMin ||
-                _goalCell.y > MatrixController.SliceGridMin + 2 ||
-                !matrix.TryGetSliceBlockTint(_goalCell.x, _goalCell.y, out _, out bool goalTint) ||
-                !goalTint)
+            if (matrix == null || !matrix.TryGetPreferredGoalSliceBlockCell(out Vector2Int goalBlockCell))
             {
                 _goalItem2D.gameObject.SetActive(false);
                 return;
             }
 
-            Vector3 p = CellToWorld(_goalCell);
+            Vector3 p = CellToWorld(goalBlockCell);
             _goalItem2D.position = new Vector3(p.x, p.y + TileSize * 0.58f, p.z - 0.18f);
             _goalItem2D.gameObject.SetActive(true);
         }
@@ -444,10 +427,22 @@ namespace LandscapeMatrix
             return _initialized;
         }
 
-        public bool IsStandingOnGoal(Vector2Int standCell)
+        /// <summary>角色与 2D 目标物（GoalItem2D）在世界空间中是否相交（包围盒），不依赖脚下是否为 Goal 格。</summary>
+        public bool IsPlayerOverlappingGoalObject()
         {
-            Vector2Int below = standCell + Vector2Int.down;
-            return IsInside(below) && _cells[below.x, below.y] == CellType.Goal;
+            if (!_playerVisible || _player == null || _goalItem2D == null || !_goalItem2D.gameObject.activeInHierarchy)
+            {
+                return false;
+            }
+
+            Renderer goalRenderer = _goalItem2D.GetComponent<Renderer>();
+            Renderer playerRenderer = _player.GetComponent<Renderer>();
+            if (goalRenderer == null || playerRenderer == null)
+            {
+                return false;
+            }
+
+            return goalRenderer.bounds.Intersects(playerRenderer.bounds);
         }
 
         private Vector2Int GetStandCell(Vector2Int blockCell)
@@ -470,6 +465,21 @@ namespace LandscapeMatrix
         public Player2DController GetPlayerController()
         {
             return _player;
+        }
+
+        public void SetPlayerSliceVisible(bool visible)
+        {
+            _playerVisible = visible;
+            if (_player == null)
+            {
+                return;
+            }
+
+            Renderer renderer = _player.GetComponent<Renderer>();
+            if (renderer != null)
+            {
+                renderer.enabled = visible;
+            }
         }
     }
 }

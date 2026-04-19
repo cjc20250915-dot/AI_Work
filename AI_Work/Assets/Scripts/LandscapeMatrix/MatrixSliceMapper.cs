@@ -131,22 +131,25 @@ namespace LandscapeMatrix
                 return cells;
             }
 
-            // 仅由当前切面采样决定地形：与 TrySampleFilledCell(viewX, viewY, SliceSampledZ) 一致。
-            // viewX 为内部列索引；映射到 2D 时用 InternalViewXToDisplayColumnOffset，使 3 列左→右与世界 +X 一致（90°/270° 需镜像）。
-            int viewZ = _matrix.SliceSampledZ;
-            for (int viewX = 0; viewX < SliceSize; viewX++)
+            // 固定切片规则：扫描全部体素，只把当前世界空间切片实际覆盖到的方块映射到左侧 2D。
+            for (int sx = 0; sx < SliceSize; sx++)
             {
-                for (int viewY = 0; viewY < SliceSize; viewY++)
+                for (int sy = 0; sy < SliceSize; sy++)
                 {
-                    if (!_matrix.TrySampleFilledCell(viewX, viewY, viewZ, out bool filled) || !filled)
+                    for (int sz = 0; sz < SliceSize; sz++)
                     {
-                        continue;
-                    }
+                        if (_matrix.voxelData == null || !_matrix.voxelData[sx, sy, sz])
+                        {
+                            continue;
+                        }
 
-                    int displayColumnOffset = _matrix.InternalViewXToDisplayColumnOffset(viewX);
-                    int worldX = SliceMin + displayColumnOffset;
-                    int worldY = SliceMin + viewY;
-                    cells[worldX, worldY] = CellType.Floor;
+                        if (!_matrix.TryStorageToSliceBlockCell(sx, sy, sz, out Vector2Int blockCell))
+                        {
+                            continue;
+                        }
+
+                        cells[blockCell.x, blockCell.y] = CellType.Floor;
+                    }
                 }
             }
 

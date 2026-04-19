@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Text;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
@@ -59,6 +60,8 @@ namespace LandscapeMatrix
 
         private static float VoxelHalfExtent => VoxelVisualSize * 0.5f;
         private static float Player3DHalfHeight => Player3DHeight * 0.5f;
+        private static float Player3DRadius => Player3DHeight * 0.24f;
+        private const float FixedSliceEpsilon = 0.02f;
 
         /// <summary>体素中心在 visualRoot 局部 X/Z 上为 -1,0,1；缩放下体素在轴上的占用区间用于命中检测（缝隙处回退到最近列）。</summary>
         private static int StorageIndexFromLocalAxis(float localCoord)
@@ -115,6 +118,17 @@ namespace LandscapeMatrix
         public Player2DController boundPlayer;
         public Player3DController player3D;
 
+        [Header("Scene References")]
+        [SerializeField] private Button _forwardButton;
+        [SerializeField] private Button _backwardButton;
+        [SerializeField] private Button _clockwiseButton;
+        [SerializeField] private Button _counterClockwiseButton;
+        [SerializeField] private Button _restartButton;
+        [SerializeField] private Camera _sliceReferenceCamera;
+
+        [Header("Debug")]
+        [SerializeField] private bool _enableDebugLogs = true;
+
         private Transform _goalItemVisual;
 
         public Vector3Int GridOffset { get; private set; }
@@ -126,6 +140,9 @@ namespace LandscapeMatrix
         private readonly List<Button> _cachedMatrixButtons = new List<Button>(8);
         private Transform _cachedSlicePlane;
         private Camera _cachedSliceCamera;
+        private bool _levelClearedFrom3DOverlap;
+        private Playfield2D _cachedPlayfield;
+        private string _pendingDebugReason = "StateChanged";
 
 #if UNITY_EDITOR
         [System.NonSerialized]
@@ -242,7 +259,10 @@ namespace LandscapeMatrix
                 boundPlayer = Object.FindFirstObjectByType<Player2DController>();
             }
 
+            _cachedPlayfield = Object.FindFirstObjectByType<Playfield2D>();
+
             CacheMatrixUiButtons();
+            BindMatrixUiButtons();
 
             if (boundPlayer != null)
             {
@@ -502,6 +522,7 @@ namespace LandscapeMatrix
             IsMatrixStateChanging = true;
             try
             {
+                _pendingDebugReason = "MoveForward";
                 GridOffset += new Vector3Int(0, 0, 1);
                 GridOffset = ClampOffset(GridOffset);
                 NotifyStateChanged();
@@ -522,6 +543,7 @@ namespace LandscapeMatrix
             IsMatrixStateChanging = true;
             try
             {
+                _pendingDebugReason = "MoveBackward";
                 GridOffset += new Vector3Int(0, 0, -1);
                 GridOffset = ClampOffset(GridOffset);
                 NotifyStateChanged();
@@ -542,6 +564,7 @@ namespace LandscapeMatrix
             IsMatrixStateChanging = true;
             try
             {
+                _pendingDebugReason = "RotateClockwise";
                 RotationStep = (RotationStep + 1) % 4;
                 NotifyStateChanged();
             }
@@ -561,6 +584,7 @@ namespace LandscapeMatrix
             IsMatrixStateChanging = true;
             try
             {
+                _pendingDebugReason = "RotateCounterClockwise";
                 RotationStep = (RotationStep + 3) % 4;
                 NotifyStateChanged();
             }
@@ -594,16 +618,69 @@ namespace LandscapeMatrix
         public void CacheMatrixUiButtons()
         {
             _cachedMatrixButtons.Clear();
-            string[] ids = { "Btn_Forward", "Btn_Backward", "Btn_CW", "Btn_CCW", "Btn_Restart" };
-            for (int i = 0; i < ids.Length; i++)
+
+            _forwardButton = ResolveButtonReference(_forwardButton, "Btn_Forward");
+            _backwardButton = ResolveButtonReference(_backwardButton, "Btn_Backward");
+            _clockwiseButton = ResolveButtonReference(_clockwiseButton, "Btn_CW");
+            _counterClockwiseButton = ResolveButtonReference(_counterClockwiseButton, "Btn_CCW");
+            _restartButton = ResolveButtonReference(_restartButton, "Btn_Restart");
+
+            TryCacheButton(_forwardButton);
+            TryCacheButton(_backwardButton);
+            TryCacheButton(_clockwiseButton);
+            TryCacheButton(_counterClockwiseButton);
+            TryCacheButton(_restartButton);
+        }
+
+        private static Button ResolveButtonReference(Button current, string objectName)
+        {
+            if (current != null)
             {
-                GameObject go = GameObject.Find(ids[i]);
-                if (go != null && go.TryGetComponent(out Button b))
-                {
-                    b.navigation = new Navigation { mode = Navigation.Mode.None };
-                    _cachedMatrixButtons.Add(b);
-                }
+                return current;
             }
+
+            GameObject go = GameObject.Find(objectName);
+            if (go == null || !go.TryGetComponent(out Button button))
+            {
+                return null;
+            }
+
+            return button;
+        }
+
+        private void TryCacheButton(Button button)
+        {
+            if (button == null)
+            {
+                return;
+            }
+
+            button.navigation = new Navigation { mode = Navigation.Mode.None };
+            if (!_cachedMatrixButtons.Contains(button))
+            {
+                _cachedMatrixButtons.Add(button);
+            }
+        }
+
+        private void BindMatrixUiButtons()
+        {
+            BindMatrixButton(_forwardButton, MoveForward);
+            BindMatrixButton(_backwardButton, MoveBackward);
+            BindMatrixButton(_clockwiseButton, RotateClockwise);
+            BindMatrixButton(_counterClockwiseButton, RotateCounterClockwise);
+            BindMatrixButton(_restartButton, RestartLevel);
+        }
+
+        private static void BindMatrixButton(Button button, UnityEngine.Events.UnityAction callback)
+        {
+            if (button == null)
+            {
+                return;
+            }
+
+            button.navigation = new Navigation { mode = Navigation.Mode.None };
+            button.onClick.RemoveAllListeners();
+            button.onClick.AddListener(callback);
         }
 
         public void RefreshMatrixButtonsInteractable()
@@ -656,36 +733,62 @@ namespace LandscapeMatrix
         /// 切面地图内地块格 (worldX, worldY)（与 <see cref="CellType"/> 地图一致；地块层 y 为 0..2）对应体素在顶面无遮挡：
         /// 该列最上层体素之上不再有填充体素（顶层 y=2 视为满足）。
         /// </summary>
-        public bool SliceBlockHasNoVoxelAbove(int worldX, int worldY)
+        private Vector3 GetStorageCenterInFixedSliceLocal(int sx, int sy, int sz)
         {
-            int displayColumnOffset = worldX - SliceGridMin;
-            int viewY = worldY - SliceGridMin;
-            if (displayColumnOffset < 0 || displayColumnOffset > 2 || viewY < 0 || viewY > 2)
+            Vector3 voxelLocal = new Vector3(sx - 1f, sy, sz - 1f);
+            if (visualRoot == null)
+            {
+                return voxelLocal;
+            }
+
+            Vector3 world = visualRoot.TransformPoint(voxelLocal);
+            return transform.InverseTransformPoint(world);
+        }
+
+        private static bool IsInsideFixedSliceSlab(float localZ, float extraHalfThickness = 0f)
+        {
+            return Mathf.Abs(localZ) <= VoxelHalfExtent + extraHalfThickness + FixedSliceEpsilon;
+        }
+
+        private bool TryMapStorageToFixedSliceBlockCell(int sx, int sy, int sz, out Vector2Int blockCell, out float absSliceDepth)
+        {
+            blockCell = default;
+            absSliceDepth = float.MaxValue;
+            if (sx < 0 || sx >= MatrixSize || sy < 0 || sy >= MatrixSize || sz < 0 || sz >= MatrixSize)
             {
                 return false;
             }
 
+            Vector3 fixedSliceLocal = GetStorageCenterInFixedSliceLocal(sx, sy, sz);
+            absSliceDepth = Mathf.Abs(fixedSliceLocal.z);
+            if (!IsInsideFixedSliceSlab(fixedSliceLocal.z))
+            {
+                return false;
+            }
+
+            int columnOffset = Mathf.Clamp(StorageIndexFromLocalAxis(fixedSliceLocal.x), 0, MatrixSize - 1);
+            blockCell = new Vector2Int(SliceGridMin + columnOffset, SliceGridMin + sy);
+            return true;
+        }
+
+        public bool SliceBlockHasNoVoxelAbove(int worldX, int worldY)
+        {
             if (voxelData == null)
             {
                 return true;
             }
 
-            int internalVx = DisplayColumnOffsetToInternalViewX(displayColumnOffset);
-            int vz = SliceSampledZ;
-            Vector2Int storageXZ = ViewXZToStorageXZ(internalVx, vz, RotationStep);
-            int sx = storageXZ.x;
-            int sz = storageXZ.y;
-            if (sx < 0 || sx >= MatrixSize || sz < 0 || sz >= MatrixSize)
+            if (!TryGetStorageForSliceBlockCell(worldX, worldY, out int sx, out int sy, out int sz))
             {
                 return false;
             }
 
-            if (viewY >= MatrixSize - 1)
+            if (sy >= MatrixSize - 1)
             {
                 return true;
             }
 
-            return !voxelData[sx, viewY + 1, sz];
+            return !voxelData[sx, sy + 1, sz];
         }
 
         /// <summary>
@@ -694,20 +797,43 @@ namespace LandscapeMatrix
         public bool TryGetStorageForSliceBlockCell(int worldX, int worldY, out int sx, out int sy, out int sz)
         {
             sx = sy = sz = 0;
-            int displayColumnOffset = worldX - SliceGridMin;
-            int viewY = worldY - SliceGridMin;
-            if (displayColumnOffset < 0 || displayColumnOffset > 2 || viewY < 0 || viewY > 2)
+            int targetColumnOffset = worldX - SliceGridMin;
+            int targetY = worldY - SliceGridMin;
+            if (targetColumnOffset < 0 || targetColumnOffset >= MatrixSize || targetY < 0 || targetY >= MatrixSize || voxelData == null)
             {
                 return false;
             }
 
-            int internalVx = DisplayColumnOffsetToInternalViewX(displayColumnOffset);
-            int vz = SliceSampledZ;
-            Vector2Int storageXZ = ViewXZToStorageXZ(internalVx, vz, RotationStep);
-            sx = storageXZ.x;
-            sy = viewY;
-            sz = storageXZ.y;
-            return true;
+            bool found = false;
+            float bestDepth = float.MaxValue;
+            for (int x = 0; x < MatrixSize; x++)
+            {
+                for (int z = 0; z < MatrixSize; z++)
+                {
+                    if (!voxelData[x, targetY, z])
+                    {
+                        continue;
+                    }
+
+                    if (!TryMapStorageToFixedSliceBlockCell(x, targetY, z, out Vector2Int blockCell, out float absSliceDepth))
+                    {
+                        continue;
+                    }
+
+                    if (blockCell.x != worldX || blockCell.y != worldY || absSliceDepth >= bestDepth)
+                    {
+                        continue;
+                    }
+
+                    bestDepth = absSliceDepth;
+                    sx = x;
+                    sy = targetY;
+                    sz = z;
+                    found = true;
+                }
+            }
+
+            return found;
         }
 
         /// <summary>
@@ -758,25 +884,7 @@ namespace LandscapeMatrix
         /// </summary>
         public bool TryStorageToSliceBlockCell(int sx, int sy, int sz, out Vector2Int blockCell)
         {
-            blockCell = default;
-            if (sx < 0 || sx >= MatrixSize || sy < 0 || sy >= MatrixSize || sz < 0 || sz >= MatrixSize)
-            {
-                return false;
-            }
-
-            Vector2Int viewXZ = RotateStorageToViewXZ(sx, sz, RotationStep);
-            int viewX = viewXZ.x;
-            int viewZ = viewXZ.y;
-            if (viewZ != SliceSampledZ)
-            {
-                return false;
-            }
-
-            int displayColumnOffset = InternalViewXToDisplayColumnOffset(viewX);
-            int worldX = SliceGridMin + displayColumnOffset;
-            int worldY = SliceGridMin + sy;
-            blockCell = new Vector2Int(worldX, worldY);
-            return true;
+            return TryMapStorageToFixedSliceBlockCell(sx, sy, sz, out blockCell, out _);
         }
 
         /// <summary>
@@ -1039,54 +1147,70 @@ namespace LandscapeMatrix
         public Vector3 GetLocalPositionForStandCell(Vector2Int standCell)
         {
             int floorGridY = standCell.y - 1;
-            int displayColumnOffset = standCell.x - SliceGridMin;
-            int sy = floorGridY - SliceGridMin;
-            int vz = SliceSampledZ;
-            if (displayColumnOffset < 0 || displayColumnOffset > 2 || sy < 0 || sy > 2)
+            if (!TryGetStorageForSliceBlockCell(standCell.x, floorGridY, out int sx, out int sy, out int sz))
             {
                 return new Vector3(0f, VoxelHalfExtent, 0f);
             }
 
-            int internalVx = DisplayColumnOffsetToInternalViewX(displayColumnOffset);
-
-            // 脚底 XZ 取当前采样深度 vz 上体素中心，与切片 viewZ 一致（对齐 SliceSampledZ）。
-            Vector3 voxelCenter = VoxelCenterLocalFromView(internalVx, sy, vz);
+            Vector3 voxelCenter = new Vector3(sx - 1f, sy, sz - 1f);
             float feetLocalY = sy + VoxelHalfExtent;
             return new Vector3(voxelCenter.x, feetLocalY, voxelCenter.z);
         }
 
         public Vector2Int WorldToSliceStandCell(Vector3 feetWorldPosition)
         {
-            if (visualRoot == null)
+            if (!TryGetSliceStandCellFromFeetWorldPosition(feetWorldPosition, out Vector2Int standCell))
             {
                 return Vector2Int.zero;
             }
 
-            Vector3 local = visualRoot.InverseTransformPoint(feetWorldPosition);
-            int sy = GetViewYFromFeetLocalY(local.y);
-            int vz = SliceSampledZ;
+            return standCell;
+        }
 
-            // 与 MatrixSliceMapper / TrySampleFilledCell 使用同一套 viewX（0..2）：取当前切片深度上距脚底最近的列心，
-            // 避免仅用 storage→view 公式在边界处与「切面实际采样的列」不一致导致 2D 左右反转。
-            int bestVx = 0;
-            float bestDist = float.MaxValue;
-            for (int vx = 0; vx < MatrixSize; vx++)
+        public bool TryGetSliceStandCellFromFeetWorldPosition(Vector3 feetWorldPosition, out Vector2Int standCell)
+        {
+            return TryMapFeetWorldPositionToSliceInfo(feetWorldPosition, out standCell, out _, requireInsideFixedSlice: true);
+        }
+
+        public bool IsFeetInsideFixedSlice(Vector3 feetWorldPosition)
+        {
+            Vector3 fixedSliceLocal = transform.InverseTransformPoint(feetWorldPosition);
+            return IsInsideFixedSliceSlab(fixedSliceLocal.z, Player3DRadius);
+        }
+
+        private bool TryMapFeetWorldPositionToSliceInfo(Vector3 feetWorldPosition, out Vector2Int standCell, out Vector3Int storageCoord)
+        {
+            return TryMapFeetWorldPositionToSliceInfo(feetWorldPosition, out standCell, out storageCoord, requireInsideFixedSlice: false);
+        }
+
+        private bool TryMapFeetWorldPositionToSliceInfo(Vector3 feetWorldPosition, out Vector2Int standCell, out Vector3Int storageCoord, bool requireInsideFixedSlice)
+        {
+            standCell = default;
+            storageCoord = default;
+            if (visualRoot == null)
             {
-                Vector3 c = VoxelCenterLocalFromView(vx, sy, vz);
-                float dx = local.x - c.x;
-                float dz = local.z - c.z;
-                float d = dx * dx + dz * dz;
-                if (d < bestDist)
-                {
-                    bestDist = d;
-                    bestVx = vx;
-                }
+                return false;
             }
 
+            Vector3 fixedSliceLocal = transform.InverseTransformPoint(feetWorldPosition);
+            if (requireInsideFixedSlice && !IsInsideFixedSliceSlab(fixedSliceLocal.z, Player3DRadius))
+            {
+                return false;
+            }
+
+            int sy = GetViewYFromFeetLocalY(fixedSliceLocal.y);
+            int columnOffset = Mathf.Clamp(StorageIndexFromLocalAxis(fixedSliceLocal.x), 0, MatrixSize - 1);
+            int worldX = SliceGridMin + columnOffset;
             int floorGridY = SliceGridMin + sy;
-            int standY = floorGridY + 1;
-            int displayColumnOffset = InternalViewXToDisplayColumnOffset(bestVx);
-            return new Vector2Int(SliceGridMin + displayColumnOffset, standY);
+            standCell = new Vector2Int(worldX, floorGridY + 1);
+
+            if (TryGetStorageForSliceBlockCell(worldX, floorGridY, out int sx, out int mappedSy, out int sz))
+            {
+                storageCoord = new Vector3Int(sx, mappedSy, sz);
+                return true;
+            }
+
+            return !requireInsideFixedSlice;
         }
 
         /// <param name="viewX">切片平面上的列 0..2（内部索引；与 2D 显示列在 90°/270° 时经 <see cref="InternalViewXToDisplayColumnOffset"/> 对应）。</param>
@@ -1213,7 +1337,8 @@ namespace LandscapeMatrix
             if (renderer != null && renderer.sharedMaterial != null)
             {
                 Material sliceMat = new Material(renderer.sharedMaterial);
-                ConfigureSlicePlaneMaterial(sliceMat, new Color(0.95f, 0.2f, 0.2f, 0.16f));
+                // 提高切面辨识度，避免“看不出当前切的是哪一层”。
+                ConfigureSlicePlaneMaterial(sliceMat, new Color(0.15f, 0.92f, 1f, 0.28f));
                 renderer.sharedMaterial = sliceMat;
             }
 
@@ -1221,7 +1346,8 @@ namespace LandscapeMatrix
         }
 
         /// <summary>
-        /// 切片参考面：固定在矩阵控制器局部位置，不随 RotationStep / GridOffset 变化；朝向与右侧参考相机像平面平行（面向相机）。
+        /// 切片参考面固定在矩阵控制器局部空间，不随矩阵旋转/前后平移移动；
+        /// 仅作为“绝对固定切片区域”的可视化提示。
         /// </summary>
         private void UpdateSliceVisualizerTransform(Transform sliceTransform)
         {
@@ -1231,7 +1357,6 @@ namespace LandscapeMatrix
             }
 
             _cachedSlicePlane = sliceTransform;
-
             sliceTransform.SetParent(transform, true);
             sliceTransform.localPosition = new Vector3(0f, 1f, 0f);
             sliceTransform.localScale = new Vector3(4.4f, 4.4f, 1f);
@@ -1288,7 +1413,6 @@ namespace LandscapeMatrix
                 return;
             }
 
-            // 仅当矩阵根、切面或参考相机位姿变化时重算朝向，避免每帧写 rotation。
             Transform camTr = _cachedSliceCamera.transform;
             Transform sliceTr = _cachedSlicePlane;
             if (!camTr.hasChanged && !transform.hasChanged && !sliceTr.hasChanged)
@@ -1302,8 +1426,81 @@ namespace LandscapeMatrix
             AlignSlicePlaneParallelToCamera(_cachedSlicePlane, _cachedSliceCamera);
         }
 
+        /// <summary>当前固定切片区域是否覆盖了偏好目标体素；覆盖时返回其在左侧 2D 中的地块格。</summary>
+        public bool TryGetPreferredGoalSliceBlockCell(out Vector2Int blockCell)
+        {
+            blockCell = default;
+            if (mapper == null || voxelData == null)
+            {
+                return false;
+            }
+
+            Vector3Int preferredGoal = mapper.preferredGoalVoxel;
+            if (preferredGoal.x < 0 || preferredGoal.x >= MatrixSize ||
+                preferredGoal.y < 0 || preferredGoal.y >= MatrixSize ||
+                preferredGoal.z < 0 || preferredGoal.z >= MatrixSize)
+            {
+                return false;
+            }
+
+            if (!voxelData[preferredGoal.x, preferredGoal.y, preferredGoal.z])
+            {
+                return false;
+            }
+
+            return TryStorageToSliceBlockCell(preferredGoal.x, preferredGoal.y, preferredGoal.z, out blockCell);
+        }
+
+        public bool TryGetPreferredGoalStorageCoord(out Vector3Int storageCoord)
+        {
+            storageCoord = default;
+            if (mapper == null || voxelData == null)
+            {
+                return false;
+            }
+
+            Vector3Int preferredGoal = mapper.preferredGoalVoxel;
+            if (preferredGoal.x < 0 || preferredGoal.x >= MatrixSize ||
+                preferredGoal.y < 0 || preferredGoal.y >= MatrixSize ||
+                preferredGoal.z < 0 || preferredGoal.z >= MatrixSize)
+            {
+                return false;
+            }
+
+            if (!voxelData[preferredGoal.x, preferredGoal.y, preferredGoal.z])
+            {
+                return false;
+            }
+
+            storageCoord = preferredGoal;
+            return true;
+        }
+
+        public bool IsDebugLoggingEnabled()
+        {
+            return _enableDebugLogs;
+        }
+
+        public bool TryGetPlayerStorageDebugInfo(out Vector2Int standCell, out Vector3Int storageCoord)
+        {
+            standCell = default;
+            storageCoord = default;
+            if (player3D == null)
+            {
+                return false;
+            }
+
+            return TryMapFeetWorldPositionToSliceInfo(player3D.GetFeetWorldPositionForDebug(), out standCell, out storageCoord);
+        }
+
         private void EnsureSliceCameraCached()
         {
+            if (_sliceReferenceCamera != null)
+            {
+                _cachedSliceCamera = _sliceReferenceCamera;
+                return;
+            }
+
             if (_cachedSliceCamera != null)
             {
                 return;
@@ -1380,6 +1577,146 @@ namespace LandscapeMatrix
             {
                 player3D.SnapToStandCell(boundPlayer.GetCurrentCell());
             }
+
+            TryNotifyLevelClearFrom3DGoalOverlap();
+            LogDebugSnapshot(_pendingDebugReason);
+            _pendingDebugReason = "StateChanged";
+        }
+
+        /// <summary>矩阵操作（尤其旋转/平移）后，若 3D 目标物与玩家发生重合则判定通关。</summary>
+        private void TryNotifyLevelClearFrom3DGoalOverlap()
+        {
+            if (_levelClearedFrom3DOverlap || player3D == null || _goalItemVisual == null || !_goalItemVisual.gameObject.activeInHierarchy)
+            {
+                return;
+            }
+
+            Renderer goalRenderer = _goalItemVisual.GetComponent<Renderer>();
+            CharacterController playerController = player3D.GetComponent<CharacterController>();
+            if (goalRenderer == null || playerController == null)
+            {
+                return;
+            }
+
+            if (!goalRenderer.bounds.Intersects(playerController.bounds))
+            {
+                return;
+            }
+
+            if (_enableDebugLogs)
+            {
+                Debug.Log($"[LandscapeMatrix Debug][3DGoalClear] playerBounds={playerController.bounds} goalBounds={goalRenderer.bounds}");
+            }
+
+            _levelClearedFrom3DOverlap = true;
+            LevelClearPresenter.Notify2DLevelCleared();
+        }
+
+        public bool IsPlayerOverlappingGoalIn3D()
+        {
+            if (player3D == null || _goalItemVisual == null || !_goalItemVisual.gameObject.activeInHierarchy)
+            {
+                return false;
+            }
+
+            Renderer goalRenderer = _goalItemVisual.GetComponent<Renderer>();
+            CharacterController playerController = player3D.GetComponent<CharacterController>();
+            if (goalRenderer == null || playerController == null)
+            {
+                return false;
+            }
+
+            return goalRenderer.bounds.Intersects(playerController.bounds);
+        }
+
+        private Playfield2D GetCachedPlayfield()
+        {
+            if (_cachedPlayfield == null)
+            {
+                _cachedPlayfield = Object.FindFirstObjectByType<Playfield2D>();
+            }
+
+            return _cachedPlayfield;
+        }
+
+        private void LogDebugSnapshot(string reason)
+        {
+            if (!_enableDebugLogs)
+            {
+                return;
+            }
+
+            var sb = new StringBuilder(768);
+            sb.Append("[LandscapeMatrix Debug][MatrixState] reason=").Append(reason)
+              .Append(" offset=").Append(GridOffset)
+              .Append(" rotationStep=").Append(RotationStep)
+              .Append(" sliceSampledZ=").Append(SliceSampledZ);
+
+            sb.Append(" | sliceBlocks=");
+            bool hasSliceBlocks = false;
+            for (int sx = 0; sx < MatrixSize; sx++)
+            {
+                for (int sy = 0; sy < MatrixSize; sy++)
+                {
+                    for (int sz = 0; sz < MatrixSize; sz++)
+                    {
+                        if (voxelData == null || !voxelData[sx, sy, sz])
+                        {
+                            continue;
+                        }
+
+                        if (!TryStorageToSliceBlockCell(sx, sy, sz, out Vector2Int blockCell))
+                        {
+                            continue;
+                        }
+
+                        sb.Append(hasSliceBlocks ? "; " : string.Empty)
+                          .Append("slice(").Append(blockCell.x).Append(',').Append(blockCell.y).Append(')')
+                          .Append("<-storage(").Append(sx).Append(',').Append(sy).Append(',').Append(sz).Append(')');
+                        hasSliceBlocks = true;
+                    }
+                }
+            }
+            if (!hasSliceBlocks)
+            {
+                sb.Append("none");
+            }
+
+            if (TryGetPlayerStorageDebugInfo(out Vector2Int playerStandCell, out Vector3Int playerStorage))
+            {
+                sb.Append(" | playerStand=").Append(playerStandCell)
+                  .Append(" playerBlockSlice=(").Append(playerStandCell.x).Append(',').Append(playerStandCell.y - 1).Append(')')
+                  .Append(" playerStorage=").Append(playerStorage);
+            }
+            else
+            {
+                sb.Append(" | playerStorage=unavailable");
+            }
+
+            if (TryGetPreferredGoalStorageCoord(out Vector3Int goalStorage))
+            {
+                sb.Append(" | goalStorage=").Append(goalStorage);
+                if (TryGetPreferredGoalSliceBlockCell(out Vector2Int goalSliceBlock))
+                {
+                    sb.Append(" goalSliceBlock=").Append(goalSliceBlock);
+                }
+                else
+                {
+                    sb.Append(" goalSliceBlock=out_of_slice");
+                }
+            }
+            else
+            {
+                sb.Append(" | goalStorage=invalid_or_hidden");
+            }
+
+            Playfield2D playfield = GetCachedPlayfield();
+            bool detected2D = playfield != null && playfield.IsPlayerOverlappingGoalObject();
+            bool detected3D = IsPlayerOverlappingGoalIn3D();
+            sb.Append(" | goalDetected2D=").Append(detected2D)
+              .Append(" goalDetected3D=").Append(detected3D);
+
+            Debug.Log(sb.ToString());
         }
 
         private bool[,,] BuildVoxelData()

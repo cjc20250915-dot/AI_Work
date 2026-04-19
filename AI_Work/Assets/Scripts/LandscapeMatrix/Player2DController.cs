@@ -14,6 +14,7 @@ namespace LandscapeMatrix
         private Playfield2D _playfield;
         private Vector2Int _cell;
         private bool _cellAssigned;
+        private bool _levelClearedFrom2D;
         private float _moveCooldown;
 
         public void Initialize(Playfield2D playfield, Vector2Int spawnCell)
@@ -52,10 +53,23 @@ namespace LandscapeMatrix
 
         public void CheckGoal()
         {
-            if (_playfield.IsStandingOnGoal(_cell))
+            if (_levelClearedFrom2D || !_playfield.IsPlayerOverlappingGoalObject())
             {
-                Debug.Log("Level clear: reached Goal.");
+                return;
             }
+
+            MatrixController matrix = UnityEngine.Object.FindFirstObjectByType<MatrixController>();
+            if (matrix != null && matrix.IsDebugLoggingEnabled())
+            {
+                string goalStorageText = matrix.TryGetPreferredGoalStorageCoord(out Vector3Int goalStorage) ? goalStorage.ToString() : "invalid_or_hidden";
+                string goalSliceText = matrix.TryGetPreferredGoalSliceBlockCell(out Vector2Int goalSliceBlock) ? goalSliceBlock.ToString() : "out_of_slice";
+                Debug.Log(
+                    $"[LandscapeMatrix Debug][2DGoalClear] playerCell={_cell} playerBlockSlice=({_cell.x},{_cell.y - 1}) " +
+                    $"goalStorage={goalStorageText} goalSliceBlock={goalSliceText}");
+            }
+
+            _levelClearedFrom2D = true;
+            LevelClearPresenter.Notify2DLevelCleared();
         }
 
         private void Update()

@@ -27,6 +27,10 @@ namespace LandscapeMatrix
         private Playfield2D _playfield;
         private float _verticalVelocity;
         private bool _lastMatrixUiInteractable = true;
+        private Vector2Int _lastLoggedStandCell = new Vector2Int(int.MinValue, int.MinValue);
+        private Vector3Int _lastLoggedStorageCoord = new Vector3Int(int.MinValue, int.MinValue, int.MinValue);
+        private bool _lastLoggedGoalDetected2D;
+        private bool _lastLoggedGoalDetected3D;
 
         private static readonly Collider[] OverlapScratch = new Collider[32];
 
@@ -256,20 +260,71 @@ namespace LandscapeMatrix
                 return;
             }
 
-            Vector2Int stand = matrix.WorldToSliceStandCell(GetFeetWorldPosition());
+            if (_playfield != null)
+            {
+                _playfield.SetPlayerSliceVisible(false);
+            }
+
+            if (!matrix.TryGetSliceStandCellFromFeetWorldPosition(GetFeetWorldPosition(), out Vector2Int stand))
+            {
+                return;
+            }
+
             if (_playfield != null)
             {
                 _playfield.SetLockedColumn(stand.x);
+                _playfield.SetPlayerSliceVisible(true);
             }
 
             _player2D.SetCell(stand);
+            LogPlayerDebugState(stand);
             _player2D.CheckGoal();
+        }
+
+        public Vector3 GetFeetWorldPositionForDebug()
+        {
+            Vector3 bottomLocal = _controller.center - Vector3.up * (_controller.height * 0.5f - _controller.skinWidth);
+            return transform.TransformPoint(bottomLocal);
         }
 
         private Vector3 GetFeetWorldPosition()
         {
-            Vector3 bottomLocal = _controller.center - Vector3.up * (_controller.height * 0.5f - _controller.skinWidth);
-            return transform.TransformPoint(bottomLocal);
+            return GetFeetWorldPositionForDebug();
+        }
+
+        private void LogPlayerDebugState(Vector2Int standCell)
+        {
+            if (matrix == null || !matrix.IsDebugLoggingEnabled())
+            {
+                return;
+            }
+
+            if (!matrix.TryGetPlayerStorageDebugInfo(out _, out Vector3Int storageCoord))
+            {
+                return;
+            }
+
+            bool goalDetected2D = _playfield != null && _playfield.IsPlayerOverlappingGoalObject();
+            bool goalDetected3D = matrix.IsPlayerOverlappingGoalIn3D();
+            if (standCell == _lastLoggedStandCell &&
+                storageCoord == _lastLoggedStorageCoord &&
+                goalDetected2D == _lastLoggedGoalDetected2D &&
+                goalDetected3D == _lastLoggedGoalDetected3D)
+            {
+                return;
+            }
+
+            _lastLoggedStandCell = standCell;
+            _lastLoggedStorageCoord = storageCoord;
+            _lastLoggedGoalDetected2D = goalDetected2D;
+            _lastLoggedGoalDetected3D = goalDetected3D;
+
+            string goalStorageText = matrix.TryGetPreferredGoalStorageCoord(out Vector3Int goalStorage) ? goalStorage.ToString() : "invalid_or_hidden";
+            string goalSliceText = matrix.TryGetPreferredGoalSliceBlockCell(out Vector2Int goalSliceBlock) ? goalSliceBlock.ToString() : "out_of_slice";
+            Debug.Log(
+                $"[LandscapeMatrix Debug][Player] stand={standCell} blockSlice=({standCell.x},{standCell.y - 1}) " +
+                $"storage={storageCoord} goalStorage={goalStorageText} goalSliceBlock={goalSliceText} " +
+                $"goalDetected2D={goalDetected2D} goalDetected3D={goalDetected3D}");
         }
     }
 }
