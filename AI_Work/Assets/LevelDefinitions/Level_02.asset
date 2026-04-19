@@ -1,0 +1,44 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 8d3f0f5f8d264bc9a6a4fb779fcb8c91, type: 3}
+  m_Name: Level_02
+  m_EditorClassIdentifier: 
+  levelId: Level_02
+  displayName: "Level 02"
+  teachingGoal: "理解 4x4x4 矩阵与平移如何改变当前切片投射"
+  matrixSize: 4
+  sliceMapWidth: 5
+  sliceFloorRows: 4
+  initialGridOffset: {x: 0, y: 0, z: 0}
+  initialRotationStep: 0
+  defaultVoxelVisible: 1
+  hiddenVoxels:
+  - x: 0
+    y: 3
+    z: 0
+  - x: 3
+    y: 3
+    z: 0
+  - x: 1
+    y: 3
+    z: 1
+  - x: 3
+    y: 0
+    z: 3
+  - x: 3
+    y: 1
+    z: 0
+  - x: 0
+    y: 1
+    z: 3
+  preferredSpawnVoxel: {x: 0, y: 3, z: 1}
+  preferredGoalVoxel: {x: 3, y: 3, z: 2}

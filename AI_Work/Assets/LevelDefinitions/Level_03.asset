@@ -1,0 +1,123 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 8d3f0f5f8d264bc9a6a4fb779fcb8c91, type: 3}
+  m_Name: Level_03
+  m_EditorClassIdentifier: 
+  levelId: Level_03
+  displayName: "Level 03"
+  teachingGoal: "理解更复杂的空置格与洞穴感结构"
+  matrixSize: 5
+  initialGridOffset: {x: 0, y: 0, z: 0}
+  initialRotationStep: 0
+  defaultVoxelVisible: 1
+  hiddenVoxels:
+  - x: 1
+    y: 1
+    z: 1
+  - x: 1
+    y: 1
+    z: 2
+  - x: 1
+    y: 1
+    z: 3
+  - x: 1
+    y: 2
+    z: 1
+  - x: 1
+    y: 2
+    z: 2
+  - x: 1
+    y: 2
+    z: 3
+  - x: 1
+    y: 3
+    z: 1
+  - x: 1
+    y: 3
+    z: 2
+  - x: 1
+    y: 3
+    z: 3
+  - x: 2
+    y: 1
+    z: 1
+  - x: 2
+    y: 1
+    z: 2
+  - x: 2
+    y: 1
+    z: 3
+  - x: 2
+    y: 2
+    z: 1
+  - x: 2
+    y: 2
+    z: 2
+  - x: 2
+    y: 2
+    z: 3
+  - x: 2
+    y: 3
+    z: 1
+  - x: 2
+    y: 3
+    z: 2
+  - x: 2
+    y: 3
+    z: 3
+  - x: 3
+    y: 1
+    z: 1
+  - x: 3
+    y: 1
+    z: 2
+  - x: 3
+    y: 1
+    z: 3
+  - x: 3
+    y: 2
+    z: 1
+  - x: 3
+    y: 2
+    z: 2
+  - x: 3
+    y: 2
+    z: 3
+  - x: 3
+    y: 3
+    z: 1
+  - x: 3
+    y: 3
+    z: 2
+  - x: 3
+    y: 3
+    z: 3
+  - x: 0
+    y: 2
+    z: 2
+  - x: 4
+    y: 2
+    z: 2
+  - x: 2
+    y: 0
+    z: 0
+  - x: 2
+    y: 0
+    z: 4
+  - x: 1
+    y: 4
+    z: 1
+  - x: 3
+    y: 4
+    z: 3
+  preferredSpawnVoxel: {x: 0, y: 4, z: 1}
+  preferredGoalVoxel: {x: 4, y: 4, z: 3}

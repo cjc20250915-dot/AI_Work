@@ -13,7 +13,7 @@ namespace LandscapeMatrix
     public class MatrixController : MonoBehaviour
     {
         /// <summary>
-        /// 保留用于旧序列化；当前逻辑为场景中始终有 3×3×3 共 27 个方块，空位仅在运行时隐藏并关闭碰撞。
+        /// 保留用于旧序列化；当前逻辑为场景中按关卡尺寸构建方块，空位仅在运行时隐藏并关闭碰撞。
         /// </summary>
         public enum HiddenVoxelStrategy
         {
@@ -29,15 +29,8 @@ namespace LandscapeMatrix
             public int z;
         }
 
-        public const int MatrixHalfRange = 1;
+        public const int DefaultMatrixSize = 3;
         public const float MatrixMoveStep = 1f;
-        public const int MatrixSize = 3;
-
-        /// <summary>左侧 2D 切面地图宽度（列，对应矩阵 viewX / 显示列 0..2）。</summary>
-        public const int SliceMapWidth = 3;
-
-        /// <summary>左侧 2D 切面地图高度：三层地块行 (y=0..2) + 一层可站立空气格 (y=3)。</summary>
-        public const int SliceMapHeight = 4;
 
         /// <summary>地块格坐标原点；与 3×3 切面列/层对应关系为 worldX = 偏移、worldY = 体素层 viewY。</summary>
         public const int SliceGridMin = 0;
@@ -64,14 +57,14 @@ namespace LandscapeMatrix
         private static float Player3DRadius => Player3DHeight * 0.24f;
         private const float FixedSliceEpsilon = 0.02f;
 
-        /// <summary>体素中心在 visualRoot 局部 X/Z 上为 -1,0,1；缩放下体素在轴上的占用区间用于命中检测（缝隙处回退到最近列）。</summary>
-        private static int StorageIndexFromLocalAxis(float localCoord)
+        /// <summary>体素中心在 visualRoot 局部 X/Z 上按关卡尺寸居中排布；缝隙处回退到最近列。</summary>
+        private int StorageIndexFromLocalAxis(float localCoord)
         {
-            int nearest = 1;
+            int nearest = CurrentMatrixSize / 2;
             float best = float.MaxValue;
-            for (int s = 0; s < MatrixSize; s++)
+            for (int s = 0; s < CurrentMatrixSize; s++)
             {
-                float center = s - 1f;
+                float center = GetCenteredAxisCoordinate(s);
                 if (localCoord >= center - VoxelHalfExtent && localCoord <= center + VoxelHalfExtent)
                 {
                     return s;
@@ -88,13 +81,16 @@ namespace LandscapeMatrix
             return nearest;
         }
 
-        /// <summary>脚点在 visualRoot 局部 Y 上对应的体素高度层 0..2（与 BuildBaseMap 中 viewY 一致）。</summary>
-        public static int GetViewYFromFeetLocalY(float feetLocalY)
+        /// <summary>脚点在 visualRoot 局部 Y 上对应的体素高度层。</summary>
+        public int GetViewYFromFeetLocalY(float feetLocalY)
         {
-            return Mathf.Clamp(Mathf.RoundToInt(feetLocalY - VoxelHalfExtent), 0, MatrixSize - 1);
+            return Mathf.Clamp(Mathf.RoundToInt(feetLocalY - VoxelHalfExtent), 0, CurrentMatrixSize - 1);
         }
 
         [Header("Matrix State (Editable)")]
+        [Min(1)] public int matrixSize = DefaultMatrixSize;
+        [Min(0)] public int sliceMapWidthOverride;
+        [Min(0)] public int sliceFloorRowsOverride;
         public Vector3Int initialGridOffset = Vector3Int.zero;
         [Range(0, 3)] public int initialRotationStep;
 
@@ -159,8 +155,61 @@ namespace LandscapeMatrix
         private bool _inspectorValidationDelayQueued;
 #endif
 
-        /// <summary>与 2D 采样一致的切片深度索引（视图 Z，0..2）。</summary>
-        public int SliceSampledZ => Mathf.Clamp(1 - GridOffset.z, 0, 2);
+        public int CurrentMatrixSize => Mathf.Max(1, matrixSize);
+        public int SliceMapWidth => sliceMapWidthOverride > 0 ? sliceMapWidthOverride : CurrentMatrixSize;
+        public int SliceFloorRowCount => sliceFloorRowsOverride > 0 ? sliceFloorRowsOverride : CurrentMatrixSize;
+        public int SliceMapHeight => SliceFloorRowCount + 1;
+        public int SliceAnchorIndex => Mathf.Clamp((CurrentMatrixSize - 1) / 2, 0, CurrentMatrixSize - 1);
+        public int MatrixHalfRange => SliceAnchorIndex;
+        public int MinGridOffsetZ => SliceAnchorIndex - (CurrentMatrixSize - 1);
+        public int MaxGridOffsetZ => SliceAnchorIndex;
+
+        /// <summary>与 2D 采样一致的切片深度索引（视图 Z）。</summary>
+        public int SliceSampledZ => Mathf.Clamp(SliceAnchorIndex - GridOffset.z, 0, CurrentMatrixSize - 1);
+
+        private float CenteredAxisOffset => (CurrentMatrixSize - 1) * 0.5f;
+        private float FixedSliceCenterLocalZ => GetCenteredAxisCoordinate(SliceAnchorIndex);
+
+        private float GetCenteredAxisCoordinate(int index)
+        {
+            return index - CenteredAxisOffset;
+        }
+
+        public void ApplyLevelData(
+            int configuredMatrixSize,
+            int configuredSliceMapWidth,
+            int configuredSliceFloorRows,
+            Vector3Int configuredInitialGridOffset,
+            int configuredInitialRotationStep,
+            bool configuredDefaultVoxelVisible,
+            VoxelCoord[] configuredHiddenVoxels)
+        {
+            matrixSize = Mathf.Max(1, configuredMatrixSize);
+            sliceMapWidthOverride = Mathf.Max(0, configuredSliceMapWidth);
+            sliceFloorRowsOverride = Mathf.Max(0, configuredSliceFloorRows);
+            initialGridOffset = configuredInitialGridOffset;
+            initialRotationStep = configuredInitialRotationStep % 4;
+            defaultVoxelVisible = configuredDefaultVoxelVisible;
+            hiddenVoxels = configuredHiddenVoxels ?? System.Array.Empty<VoxelCoord>();
+
+            if (visualRoot != null)
+            {
+                voxelData = BuildVoxelData();
+                GridOffset = ClampOffset(initialGridOffset);
+                RotationStep = initialRotationStep % 4;
+                EnsureVoxelGridComplete();
+                DestroyLegacyVoxelsOutsideDataBounds();
+                SyncVoxelTransformsToCurrentLayout();
+                ApplyVoxelVisibilityFromData();
+                CreateSliceVisualizer();
+                EnsureAirWalls();
+
+                if (Application.isPlaying)
+                {
+                    NotifyStateChanged();
+                }
+            }
+        }
 
         /// <summary>切片参考面可视化（无碰撞 Quad）。挂在矩阵控制器上，不随体素根的旋转/前后平移变化。</summary>
         private const string SlicePlaneVisualName = "SlicePlaneVisual";
@@ -303,6 +352,7 @@ namespace LandscapeMatrix
                 GridOffset = ClampOffset(initialGridOffset);
                 RotationStep = initialRotationStep % 4;
                 EnsureVoxelGridComplete();
+                SyncVoxelTransformsToCurrentLayout();
                 ApplyVoxelVisibilityFromData();
                 CreateSliceVisualizer();
                 EnsureAirWalls();
@@ -339,6 +389,7 @@ namespace LandscapeMatrix
 
             voxelData = BuildVoxelData();
             EnsureVoxelGridComplete();
+            SyncVoxelTransformsToCurrentLayout();
             ApplyVoxelVisibilityFromData();
         }
 
@@ -382,6 +433,7 @@ namespace LandscapeMatrix
             }
 
             EnsureVoxelGridComplete();
+            SyncVoxelTransformsToCurrentLayout();
             ApplyVoxelVisibilityFromData();
 
             Transform slice = FindSlicePlaneVisualTransform();
@@ -414,6 +466,46 @@ namespace LandscapeMatrix
             return FindDirectChildByName(visualRoot, VoxelObjectName(x, y, z));
         }
 
+        private void DestroyLegacyVoxelsOutsideDataBounds()
+        {
+            if (visualRoot == null)
+            {
+                return;
+            }
+
+            for (int i = visualRoot.childCount - 1; i >= 0; i--)
+            {
+                Transform child = visualRoot.GetChild(i);
+                if (child == null || !child.name.StartsWith("Voxel_", System.StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                string[] parts = child.name.Split('_');
+                if (parts.Length != 4 ||
+                    !int.TryParse(parts[1], out int x) ||
+                    !int.TryParse(parts[2], out int y) ||
+                    !int.TryParse(parts[3], out int z))
+                {
+                    continue;
+                }
+
+                if (x >= 0 && x < CurrentMatrixSize && y >= 0 && y < CurrentMatrixSize && z >= 0 && z < CurrentMatrixSize)
+                {
+                    continue;
+                }
+
+                if (Application.isPlaying)
+                {
+                    Object.Destroy(child.gameObject);
+                }
+                else
+                {
+                    Object.DestroyImmediate(child.gameObject);
+                }
+            }
+        }
+
         /// <summary>
         /// 保证 MatrixVisual 下存在全部 27 个体素物体（编辑态写入场景；缺失则创建）。
         /// 不删除已有物体，避免反复清空再生成。
@@ -425,11 +517,11 @@ namespace LandscapeMatrix
                 return;
             }
 
-            for (int x = 0; x < MatrixSize; x++)
+            for (int x = 0; x < CurrentMatrixSize; x++)
             {
-                for (int y = 0; y < MatrixSize; y++)
+                for (int y = 0; y < CurrentMatrixSize; y++)
                 {
-                    for (int z = 0; z < MatrixSize; z++)
+                    for (int z = 0; z < CurrentMatrixSize; z++)
                     {
                         if (FindVoxelTransform(x, y, z) != null)
                         {
@@ -439,13 +531,62 @@ namespace LandscapeMatrix
                         GameObject cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
                         cube.name = VoxelObjectName(x, y, z);
                         cube.transform.SetParent(visualRoot, false);
-                        cube.transform.localPosition = new Vector3(x - 1f, y, z - 1f);
+                        cube.transform.localPosition = new Vector3(GetCenteredAxisCoordinate(x), y, GetCenteredAxisCoordinate(z));
                         cube.transform.localScale = Vector3.one * VoxelVisualSize;
                         LandscapeMatrixRendererColors.SetColor(cube.GetComponent<Renderer>(), VoxelNeutralColor);
                         cube.SetActive(true);
                     }
                 }
             }
+        }
+
+        private void SyncVoxelTransformsToCurrentLayout()
+        {
+            if (visualRoot == null)
+            {
+                return;
+            }
+
+            for (int x = 0; x < CurrentMatrixSize; x++)
+            {
+                for (int y = 0; y < CurrentMatrixSize; y++)
+                {
+                    for (int z = 0; z < CurrentMatrixSize; z++)
+                    {
+                        Transform voxel = FindVoxelTransform(x, y, z);
+                        if (voxel == null)
+                        {
+                            continue;
+                        }
+
+                        voxel.localPosition = new Vector3(GetCenteredAxisCoordinate(x), y, GetCenteredAxisCoordinate(z));
+                        voxel.localRotation = Quaternion.identity;
+                        voxel.localScale = Vector3.one * VoxelVisualSize;
+                    }
+                }
+            }
+        }
+
+        public void RebuildStaticSceneVisualsForEditor()
+        {
+            voxelData = BuildVoxelData();
+            if (visualRoot == null)
+            {
+                visualRoot = FindDirectChildByName(transform, MatrixVisualChildName);
+            }
+
+            if (visualRoot == null)
+            {
+                BuildMatrixVisual();
+                return;
+            }
+
+            EnsureVoxelGridComplete();
+            DestroyLegacyVoxelsOutsideDataBounds();
+            SyncVoxelTransformsToCurrentLayout();
+            ApplyVoxelVisibilityFromData();
+            CreateSliceVisualizer();
+            EnsureAirWalls();
         }
 
         /// <summary>
@@ -458,11 +599,11 @@ namespace LandscapeMatrix
                 return;
             }
 
-            for (int x = 0; x < MatrixSize; x++)
+            for (int x = 0; x < CurrentMatrixSize; x++)
             {
-                for (int y = 0; y < MatrixSize; y++)
+                for (int y = 0; y < CurrentMatrixSize; y++)
                 {
-                    for (int z = 0; z < MatrixSize; z++)
+                    for (int z = 0; z < CurrentMatrixSize; z++)
                     {
                         Transform t = FindVoxelTransform(x, y, z);
                         if (t == null)
@@ -500,7 +641,7 @@ namespace LandscapeMatrix
         private Vector3 VoxelCenterLocalFromView(int viewX, int viewY, int viewZ)
         {
             Vector2Int s = ViewXZToStorageXZ(viewX, viewZ, RotationStep);
-            return new Vector3(s.x - 1f, viewY, s.y - 1f);
+            return new Vector3(GetCenteredAxisCoordinate(s.x), viewY, GetCenteredAxisCoordinate(s.y));
         }
 
         public void Initialize(MatrixSliceMapper mapper)
@@ -725,25 +866,25 @@ namespace LandscapeMatrix
         /// </summary>
         public int InternalViewXToDisplayColumnOffset(int internalViewX)
         {
-            internalViewX = Mathf.Clamp(internalViewX, 0, MatrixSize - 1);
+            internalViewX = Mathf.Clamp(internalViewX, 0, CurrentMatrixSize - 1);
             if (RotationStep % 2 == 0)
             {
                 return internalViewX;
             }
 
-            return MatrixSize - 1 - internalViewX;
+            return CurrentMatrixSize - 1 - internalViewX;
         }
 
         /// <summary>显示列偏移 0..2（网格 x = <see cref="SliceGridMin"/> + 偏移，即 0..2）→ 内部 viewX。</summary>
         public int DisplayColumnOffsetToInternalViewX(int displayColumnOffset)
         {
-            displayColumnOffset = Mathf.Clamp(displayColumnOffset, 0, MatrixSize - 1);
+            displayColumnOffset = Mathf.Clamp(displayColumnOffset, 0, CurrentMatrixSize - 1);
             if (RotationStep % 2 == 0)
             {
                 return displayColumnOffset;
             }
 
-            return MatrixSize - 1 - displayColumnOffset;
+            return CurrentMatrixSize - 1 - displayColumnOffset;
         }
 
         /// <summary>
@@ -752,7 +893,7 @@ namespace LandscapeMatrix
         /// </summary>
         private Vector3 GetStorageCenterInFixedSliceLocal(int sx, int sy, int sz)
         {
-            Vector3 voxelLocal = new Vector3(sx - 1f, sy, sz - 1f);
+            Vector3 voxelLocal = new Vector3(GetCenteredAxisCoordinate(sx), sy, GetCenteredAxisCoordinate(sz));
             if (visualRoot == null)
             {
                 return voxelLocal;
@@ -762,28 +903,28 @@ namespace LandscapeMatrix
             return transform.InverseTransformPoint(world);
         }
 
-        private static bool IsInsideFixedSliceSlab(float localZ, float extraHalfThickness = 0f)
+        private bool IsInsideFixedSliceSlab(float localZ, float extraHalfThickness = 0f)
         {
-            return Mathf.Abs(localZ) <= VoxelHalfExtent + extraHalfThickness + FixedSliceEpsilon;
+            return Mathf.Abs(localZ - FixedSliceCenterLocalZ) <= VoxelHalfExtent + extraHalfThickness + FixedSliceEpsilon;
         }
 
         private bool TryMapStorageToFixedSliceBlockCell(int sx, int sy, int sz, out Vector2Int blockCell, out float absSliceDepth)
         {
             blockCell = default;
             absSliceDepth = float.MaxValue;
-            if (sx < 0 || sx >= MatrixSize || sy < 0 || sy >= MatrixSize || sz < 0 || sz >= MatrixSize)
+            if (sx < 0 || sx >= CurrentMatrixSize || sy < 0 || sy >= SliceFloorRowCount || sz < 0 || sz >= CurrentMatrixSize)
             {
                 return false;
             }
 
             Vector3 fixedSliceLocal = GetStorageCenterInFixedSliceLocal(sx, sy, sz);
-            absSliceDepth = Mathf.Abs(fixedSliceLocal.z);
+            absSliceDepth = Mathf.Abs(fixedSliceLocal.z - FixedSliceCenterLocalZ);
             if (!IsInsideFixedSliceSlab(fixedSliceLocal.z))
             {
                 return false;
             }
 
-            int columnOffset = Mathf.Clamp(StorageIndexFromLocalAxis(fixedSliceLocal.x), 0, MatrixSize - 1);
+            int columnOffset = Mathf.Clamp(StorageIndexFromLocalAxis(fixedSliceLocal.x), 0, CurrentMatrixSize - 1);
             blockCell = new Vector2Int(SliceGridMin + columnOffset, SliceGridMin + sy);
             return true;
         }
@@ -800,7 +941,7 @@ namespace LandscapeMatrix
                 return false;
             }
 
-            if (sy >= MatrixSize - 1)
+            if (sy >= SliceFloorRowCount - 1)
             {
                 return true;
             }
@@ -816,16 +957,16 @@ namespace LandscapeMatrix
             sx = sy = sz = 0;
             int targetColumnOffset = worldX - SliceGridMin;
             int targetY = worldY - SliceGridMin;
-            if (targetColumnOffset < 0 || targetColumnOffset >= MatrixSize || targetY < 0 || targetY >= MatrixSize || voxelData == null)
+            if (targetColumnOffset < 0 || targetColumnOffset >= SliceMapWidth || targetY < 0 || targetY >= SliceFloorRowCount || voxelData == null)
             {
                 return false;
             }
 
             bool found = false;
             float bestDepth = float.MaxValue;
-            for (int x = 0; x < MatrixSize; x++)
+            for (int x = 0; x < CurrentMatrixSize; x++)
             {
-                for (int z = 0; z < MatrixSize; z++)
+                for (int z = 0; z < CurrentMatrixSize; z++)
                 {
                     if (!voxelData[x, targetY, z])
                     {
@@ -866,7 +1007,7 @@ namespace LandscapeMatrix
                 return false;
             }
 
-            if (worldY < SliceGridMin || worldY > SliceGridMin + 2)
+            if (worldY < SliceGridMin || worldY > SliceGridMin + SliceFloorRowCount - 1)
             {
                 return false;
             }
@@ -915,11 +1056,11 @@ namespace LandscapeMatrix
                 return;
             }
 
-            for (int x = 0; x < MatrixSize; x++)
+            for (int x = 0; x < CurrentMatrixSize; x++)
             {
-                for (int y = 0; y < MatrixSize; y++)
+                for (int y = 0; y < CurrentMatrixSize; y++)
                 {
-                    for (int z = 0; z < MatrixSize; z++)
+                    for (int z = 0; z < CurrentMatrixSize; z++)
                     {
                         if (!voxelData[x, y, z])
                         {
@@ -1009,7 +1150,7 @@ namespace LandscapeMatrix
 
         private bool TryHighlightVoxelStorage(int sx, int sy, int sz, Color color)
         {
-            if (sx < 0 || sx >= MatrixSize || sy < 0 || sy >= MatrixSize || sz < 0 || sz >= MatrixSize)
+            if (sx < 0 || sx >= CurrentMatrixSize || sy < 0 || sy >= CurrentMatrixSize || sz < 0 || sz >= CurrentMatrixSize)
             {
                 return false;
             }
@@ -1107,7 +1248,7 @@ namespace LandscapeMatrix
         private bool TryGetGoalStorageFromPreferredVoxel(int sx, int sy, int sz, out int ox, out int oy, out int oz)
         {
             ox = oy = oz = 0;
-            if (voxelData == null || sx < 0 || sx >= MatrixSize || sy < 0 || sy >= MatrixSize || sz < 0 || sz >= MatrixSize)
+            if (voxelData == null || sx < 0 || sx >= CurrentMatrixSize || sy < 0 || sy >= CurrentMatrixSize || sz < 0 || sz >= CurrentMatrixSize)
             {
                 return false;
             }
@@ -1151,14 +1292,15 @@ namespace LandscapeMatrix
         }
 
         /// <summary>体素存储索引 (sx,sz) 转为视图水平面索引 (vx,vz)，与 ViewXZToStorageXZ 互逆。</summary>
-        public static Vector2Int RotateStorageToViewXZ(int storageX, int storageZ, int rotationStep)
+        private Vector2Int RotateStorageToViewXZ(int storageX, int storageZ, int rotationStep)
         {
+            int last = CurrentMatrixSize - 1;
             return (rotationStep % 4) switch
             {
                 0 => new Vector2Int(storageX, storageZ),
-                1 => new Vector2Int(2 - storageZ, storageX),
-                2 => new Vector2Int(2 - storageX, 2 - storageZ),
-                _ => new Vector2Int(storageZ, 2 - storageX)
+                1 => new Vector2Int(last - storageZ, storageX),
+                2 => new Vector2Int(last - storageX, last - storageZ),
+                _ => new Vector2Int(storageZ, last - storageX)
             };
         }
 
@@ -1170,7 +1312,7 @@ namespace LandscapeMatrix
                 return new Vector3(0f, VoxelHalfExtent, 0f);
             }
 
-            Vector3 voxelCenter = new Vector3(sx - 1f, sy, sz - 1f);
+            Vector3 voxelCenter = new Vector3(GetCenteredAxisCoordinate(sx), sy, GetCenteredAxisCoordinate(sz));
             float feetLocalY = sy + VoxelHalfExtent;
             return new Vector3(voxelCenter.x, feetLocalY, voxelCenter.z);
         }
@@ -1217,7 +1359,7 @@ namespace LandscapeMatrix
             }
 
             int sy = GetViewYFromFeetLocalY(fixedSliceLocal.y);
-            int columnOffset = Mathf.Clamp(StorageIndexFromLocalAxis(fixedSliceLocal.x), 0, MatrixSize - 1);
+            int columnOffset = Mathf.Clamp(StorageIndexFromLocalAxis(fixedSliceLocal.x), 0, CurrentMatrixSize - 1);
             int worldX = SliceGridMin + columnOffset;
             int floorGridY = SliceGridMin + sy;
             standCell = new Vector2Int(worldX, floorGridY + 1);
@@ -1242,13 +1384,13 @@ namespace LandscapeMatrix
                 return false;
             }
 
-            if (storageY < 0 || storageY >= MatrixSize || viewX < 0 || viewX >= MatrixSize || viewZ < 0 || viewZ >= MatrixSize)
+            if (storageY < 0 || storageY >= CurrentMatrixSize || viewX < 0 || viewX >= CurrentMatrixSize || viewZ < 0 || viewZ >= CurrentMatrixSize)
             {
                 return false;
             }
 
             Vector2Int baseXZ = ViewXZToStorageXZ(viewX, viewZ, RotationStep);
-            if (baseXZ.x < 0 || baseXZ.x >= MatrixSize || baseXZ.y < 0 || baseXZ.y >= MatrixSize)
+            if (baseXZ.x < 0 || baseXZ.x >= CurrentMatrixSize || baseXZ.y < 0 || baseXZ.y >= CurrentMatrixSize)
             {
                 return false;
             }
@@ -1258,17 +1400,17 @@ namespace LandscapeMatrix
         }
 
         /// <summary>视图水平面 (viewX, viewZ) → 存储 (sx, sz)。与 <see cref="RotateStorageToViewXZ"/> 互逆。</summary>
-        public static Vector2Int ViewXZToStorageXZ(int viewX, int viewZ, int rotationStep)
+        public Vector2Int ViewXZToStorageXZ(int viewX, int viewZ, int rotationStep)
         {
             return RotateInverse(viewX, viewZ, rotationStep);
         }
 
-        private static Vector3Int ClampOffset(Vector3Int offset)
+        private Vector3Int ClampOffset(Vector3Int offset)
         {
             return new Vector3Int(
                 0,
                 0,
-                Mathf.Clamp(offset.z, -MatrixHalfRange, MatrixHalfRange));
+                Mathf.Clamp(offset.z, MinGridOffsetZ, MaxGridOffsetZ));
         }
 
         private Transform FindSlicePlaneVisualTransform()
@@ -1376,8 +1518,9 @@ namespace LandscapeMatrix
 
             _cachedSlicePlane = sliceTransform;
             sliceTransform.SetParent(transform, true);
-            sliceTransform.localPosition = new Vector3(0f, 1f, 0f);
-            sliceTransform.localScale = new Vector3(4.4f, 4.4f, 1f);
+            float sliceScale = CurrentMatrixSize + 1.4f;
+            sliceTransform.localPosition = new Vector3(0f, Mathf.Max(1f, (CurrentMatrixSize - 1) * 0.5f), FixedSliceCenterLocalZ);
+            sliceTransform.localScale = new Vector3(sliceScale, sliceScale, 1f);
             EnsureSliceCameraCached();
 
             AlignSlicePlaneParallelToCamera(sliceTransform, _cachedSliceCamera);
@@ -1454,9 +1597,9 @@ namespace LandscapeMatrix
             }
 
             Vector3Int preferredGoal = mapper.preferredGoalVoxel;
-            if (preferredGoal.x < 0 || preferredGoal.x >= MatrixSize ||
-                preferredGoal.y < 0 || preferredGoal.y >= MatrixSize ||
-                preferredGoal.z < 0 || preferredGoal.z >= MatrixSize)
+            if (preferredGoal.x < 0 || preferredGoal.x >= CurrentMatrixSize ||
+                preferredGoal.y < 0 || preferredGoal.y >= CurrentMatrixSize ||
+                preferredGoal.z < 0 || preferredGoal.z >= CurrentMatrixSize)
             {
                 return false;
             }
@@ -1478,9 +1621,9 @@ namespace LandscapeMatrix
             }
 
             Vector3Int preferredGoal = mapper.preferredGoalVoxel;
-            if (preferredGoal.x < 0 || preferredGoal.x >= MatrixSize ||
-                preferredGoal.y < 0 || preferredGoal.y >= MatrixSize ||
-                preferredGoal.z < 0 || preferredGoal.z >= MatrixSize)
+            if (preferredGoal.x < 0 || preferredGoal.x >= CurrentMatrixSize ||
+                preferredGoal.y < 0 || preferredGoal.y >= CurrentMatrixSize ||
+                preferredGoal.z < 0 || preferredGoal.z >= CurrentMatrixSize)
             {
                 return false;
             }
@@ -1679,11 +1822,11 @@ namespace LandscapeMatrix
 
             sb.Append(" | sliceBlocks=");
             bool hasSliceBlocks = false;
-            for (int sx = 0; sx < MatrixSize; sx++)
+            for (int sx = 0; sx < CurrentMatrixSize; sx++)
             {
-                for (int sy = 0; sy < MatrixSize; sy++)
+                for (int sy = 0; sy < CurrentMatrixSize; sy++)
                 {
-                    for (int sz = 0; sz < MatrixSize; sz++)
+                    for (int sz = 0; sz < CurrentMatrixSize; sz++)
                     {
                         if (voxelData == null || !voxelData[sx, sy, sz])
                         {
@@ -1746,12 +1889,12 @@ namespace LandscapeMatrix
 
         private bool[,,] BuildVoxelData()
         {
-            bool[,,] data = new bool[MatrixSize, MatrixSize, MatrixSize];
-            for (int x = 0; x < MatrixSize; x++)
+            bool[,,] data = new bool[CurrentMatrixSize, CurrentMatrixSize, CurrentMatrixSize];
+            for (int x = 0; x < CurrentMatrixSize; x++)
             {
-                for (int y = 0; y < MatrixSize; y++)
+                for (int y = 0; y < CurrentMatrixSize; y++)
                 {
-                    for (int z = 0; z < MatrixSize; z++)
+                    for (int z = 0; z < CurrentMatrixSize; z++)
                     {
                         data[x, y, z] = defaultVoxelVisible;
                     }
@@ -1763,9 +1906,9 @@ namespace LandscapeMatrix
                 for (int i = 0; i < hiddenVoxels.Length; i++)
                 {
                     VoxelCoord coord = hiddenVoxels[i];
-                    if (coord.x < 0 || coord.x >= MatrixSize ||
-                        coord.y < 0 || coord.y >= MatrixSize ||
-                        coord.z < 0 || coord.z >= MatrixSize)
+                    if (coord.x < 0 || coord.x >= CurrentMatrixSize ||
+                        coord.y < 0 || coord.y >= CurrentMatrixSize ||
+                        coord.z < 0 || coord.z >= CurrentMatrixSize)
                     {
                         continue;
                     }
@@ -1775,14 +1918,15 @@ namespace LandscapeMatrix
             return data;
         }
 
-        private static Vector2Int RotateInverse(int x, int z, int rotationStep)
+        private Vector2Int RotateInverse(int x, int z, int rotationStep)
         {
+            int last = CurrentMatrixSize - 1;
             return (rotationStep % 4) switch
             {
                 0 => new Vector2Int(x, z),
-                1 => new Vector2Int(z, 2 - x),
-                2 => new Vector2Int(2 - x, 2 - z),
-                _ => new Vector2Int(2 - z, x)
+                1 => new Vector2Int(z, last - x),
+                2 => new Vector2Int(last - x, last - z),
+                _ => new Vector2Int(last - z, x)
             };
         }
 
@@ -1977,9 +2121,9 @@ namespace LandscapeMatrix
             root.transform.SetParent(visualRoot, false);
 
             float half = VoxelHalfExtent;
-            float gridHalf = (MatrixSize - 1) * 0.5f + half;
+            float gridHalf = (CurrentMatrixSize - 1) * 0.5f + half;
             float t = 0.18f;
-            float wallHeight = 5.5f;
+            float wallHeight = Mathf.Max(5.5f, CurrentMatrixSize + 2.5f);
             float span = gridHalf * 2f + t * 2f;
 
             void AddWall(string wallName, Vector3 localCenter, Vector3 size)
@@ -2054,11 +2198,11 @@ namespace LandscapeMatrix
                 _presentationRoot.SetParent(transform, false);
             }
 
-            for (int x = 0; x < MatrixSize; x++)
+            for (int x = 0; x < CurrentMatrixSize; x++)
             {
-                for (int y = 0; y < MatrixSize; y++)
+                for (int y = 0; y < CurrentMatrixSize; y++)
                 {
-                    for (int z = 0; z < MatrixSize; z++)
+                    for (int z = 0; z < CurrentMatrixSize; z++)
                     {
                         Transform logicalVoxel = FindVoxelTransform(x, y, z);
                         if (logicalVoxel == null)
@@ -2104,11 +2248,11 @@ namespace LandscapeMatrix
                 return;
             }
 
-            for (int x = 0; x < MatrixSize; x++)
+            for (int x = 0; x < CurrentMatrixSize; x++)
             {
-                for (int y = 0; y < MatrixSize; y++)
+                for (int y = 0; y < CurrentMatrixSize; y++)
                 {
-                    for (int z = 0; z < MatrixSize; z++)
+                    for (int z = 0; z < CurrentMatrixSize; z++)
                     {
                         Transform logicalVoxel = FindVoxelTransform(x, y, z);
                         Transform presentationVoxel = FindDirectChildByName(_presentationRoot, VoxelObjectName(x, y, z));
@@ -2157,11 +2301,11 @@ namespace LandscapeMatrix
                 return;
             }
 
-            for (int x = 0; x < MatrixSize; x++)
+            for (int x = 0; x < CurrentMatrixSize; x++)
             {
-                for (int y = 0; y < MatrixSize; y++)
+                for (int y = 0; y < CurrentMatrixSize; y++)
                 {
-                    for (int z = 0; z < MatrixSize; z++)
+                    for (int z = 0; z < CurrentMatrixSize; z++)
                     {
                         Transform logicalVoxel = FindVoxelTransform(x, y, z);
                         if (logicalVoxel == null || !logicalVoxel.TryGetComponent(out Renderer renderer))

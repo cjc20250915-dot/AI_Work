@@ -7,11 +7,14 @@ namespace LandscapeMatrix
     [DefaultExecutionOrder(-100)]
     public class MatrixSliceMapper : MonoBehaviour
     {
-        private const int SliceSize = 3;
         private static int SliceMin => MatrixController.SliceGridMin;
-        private static int SliceMax => SliceMin + SliceSize - 1;
+        private int SliceSize => _matrix != null ? _matrix.CurrentMatrixSize : MatrixController.DefaultMatrixSize;
+        private int SliceWidth => _matrix != null ? _matrix.SliceMapWidth : MatrixController.DefaultMatrixSize;
+        private int SliceFloorRows => _matrix != null ? _matrix.SliceFloorRowCount : MatrixController.DefaultMatrixSize;
+        private int SliceMaxX => SliceMin + SliceWidth - 1;
+        private int SliceMaxY => SliceMin + SliceFloorRows - 1;
 
-        [Header("出生点 / 目标（3D 矩阵体素坐标，与右侧 Voxel_x_y_z 一致：x,y,z ∈ [0,2]）")]
+        [Header("出生点 / 目标（3D 矩阵体素坐标，与右侧 Voxel_x_y_z 一致）")]
         [Tooltip("3D 出生高亮与左屏出生格优先对应的体素。左屏格仍须落在当前切面且为地板候选；否则左屏按从左到右、从下到上选。3D 体素色始终跟此项（有体素时）。")]
         public Vector3Int preferredSpawnVoxel = new Vector3Int(0, 0, 1);
 
@@ -58,6 +61,17 @@ namespace LandscapeMatrix
             }
 
             _matrix.Initialize(this);
+        }
+
+        public void ApplyLevelData(Vector3Int configuredPreferredSpawnVoxel, Vector3Int configuredPreferredGoalVoxel)
+        {
+            preferredSpawnVoxel = configuredPreferredSpawnVoxel;
+            preferredGoalVoxel = configuredPreferredGoalVoxel;
+
+            if (Application.isPlaying && _matrix != null)
+            {
+                _matrix.NotifyMatrixStateChanged();
+            }
         }
 
         public CellType[,] BuildCurrentSliceMap() => BuildBaseMap();
@@ -112,11 +126,13 @@ namespace LandscapeMatrix
 
         private CellType[,] BuildBaseMap()
         {
-            CellType[,] cells = new CellType[MatrixController.SliceMapWidth, MatrixController.SliceMapHeight];
+            int width = _matrix != null ? _matrix.SliceMapWidth : MatrixController.DefaultMatrixSize;
+            int height = _matrix != null ? _matrix.SliceMapHeight : MatrixController.DefaultMatrixSize + 1;
+            CellType[,] cells = new CellType[width, height];
 
-            for (int x = 0; x < MatrixController.SliceMapWidth; x++)
+            for (int x = 0; x < width; x++)
             {
-                for (int y = 0; y < MatrixController.SliceMapHeight; y++)
+                for (int y = 0; y < height; y++)
                 {
                     cells[x, y] = CellType.Empty;
                 }
@@ -126,15 +142,19 @@ namespace LandscapeMatrix
             {
                 // 初始化早期兜底，避免因矩阵未绑定导致场景构建中断。
                 cells[0, 0] = CellType.Spawn;
-                cells[1, 0] = CellType.Floor;
-                cells[2, 0] = CellType.Goal;
+                if (width > 1)
+                {
+                    cells[Mathf.Min(1, width - 1), 0] = CellType.Floor;
+                }
+
+                cells[Mathf.Max(0, width - 1), 0] = CellType.Goal;
                 return cells;
             }
 
             // 固定切片规则：扫描全部体素，只把当前世界空间切片实际覆盖到的方块映射到左侧 2D。
             for (int sx = 0; sx < SliceSize; sx++)
             {
-                for (int sy = 0; sy < SliceSize; sy++)
+                for (int sy = 0; sy < SliceFloorRows; sy++)
                 {
                     for (int sz = 0; sz < SliceSize; sz++)
                     {
@@ -162,9 +182,9 @@ namespace LandscapeMatrix
         private void PlaceSpawnAndGoal(CellType[,] cells)
         {
             var floors = new List<Vector2Int>();
-            for (int x = SliceMin; x <= SliceMax; x++)
+            for (int x = SliceMin; x <= SliceMaxX; x++)
             {
-                for (int y = SliceMin; y <= SliceMax; y++)
+                for (int y = SliceMin; y <= SliceMaxY; y++)
                 {
                     if (cells[x, y] == CellType.Floor)
                     {
@@ -220,7 +240,7 @@ namespace LandscapeMatrix
             }
         }
 
-        private static Vector2Int PickSpawnCandidate(List<Vector2Int> candidates, Vector2Int? preferred)
+        private Vector2Int PickSpawnCandidate(List<Vector2Int> candidates, Vector2Int? preferred)
         {
             if (candidates == null || candidates.Count == 0)
             {
@@ -232,9 +252,9 @@ namespace LandscapeMatrix
                 return preferred.Value;
             }
 
-            for (int x = SliceMin; x <= SliceMax; x++)
+            for (int x = SliceMin; x <= SliceMaxX; x++)
             {
-                for (int y = SliceMin; y <= SliceMax; y++)
+                for (int y = SliceMin; y <= SliceMaxY; y++)
                 {
                     Vector2Int c = new Vector2Int(x, y);
                     if (CellListContains(candidates, c))
@@ -247,7 +267,7 @@ namespace LandscapeMatrix
             return candidates[0];
         }
 
-        private static Vector2Int PickGoalCandidate(List<Vector2Int> candidates, Vector2Int spawn, Vector2Int? preferred)
+        private Vector2Int PickGoalCandidate(List<Vector2Int> candidates, Vector2Int spawn, Vector2Int? preferred)
         {
             if (candidates == null || candidates.Count == 0)
             {
@@ -259,9 +279,9 @@ namespace LandscapeMatrix
                 return preferred.Value;
             }
 
-            for (int x = SliceMax; x >= SliceMin; x--)
+            for (int x = SliceMaxX; x >= SliceMin; x--)
             {
-                for (int y = SliceMin; y <= SliceMax; y++)
+                for (int y = SliceMin; y <= SliceMaxY; y++)
                 {
                     Vector2Int c = new Vector2Int(x, y);
                     if (CellListContains(candidates, c) && c != spawn)

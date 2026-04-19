@@ -15,13 +15,10 @@ namespace LandscapeMatrix
     public class Playfield2D : MonoBehaviour
     {
         private const float TileSize = 1f;
-        private const int Width = MatrixController.SliceMapWidth;
-        private const int Height = MatrixController.SliceMapHeight;
         private const int SliceMinX = 0;
-        private const int SliceMaxX = MatrixController.SliceMapWidth - 1;
 
-        private CellType[,] _cells = new CellType[Width, Height];
-        private GameObject[,] _tiles = new GameObject[Width, Height];
+        private CellType[,] _cells = new CellType[MatrixController.DefaultMatrixSize, MatrixController.DefaultMatrixSize + 1];
+        private GameObject[,] _tiles = new GameObject[MatrixController.DefaultMatrixSize, MatrixController.DefaultMatrixSize + 1];
         private MatrixSliceMapper _mapper;
         private Player2DController _player;
         private Vector2Int _spawnCell = new Vector2Int(-1, -1);
@@ -31,6 +28,10 @@ namespace LandscapeMatrix
         private int _lockedColumnX = SliceMinX;
         private bool _playerVisible = true;
         public bool IsPlayerDead { get; private set; }
+
+        private int Width => _cells.GetLength(0);
+        private int Height => _cells.GetLength(1);
+        private int SliceMaxX => Width - 1;
 
         public void Initialize(MatrixSliceMapper mapper)
         {
@@ -129,6 +130,10 @@ namespace LandscapeMatrix
 
         private void BuildStaticBoard()
         {
+            int width = GetConfiguredWidth();
+            int height = GetConfiguredHeight();
+            _cells = new CellType[width, height];
+            _tiles = new GameObject[width, height];
             DestroyLegacyTilesOutsideMap();
             for (int x = 0; x < Width; x++)
             {
@@ -138,6 +143,14 @@ namespace LandscapeMatrix
                     _tiles[x, y] = CreateTileVisual(x, y);
                 }
             }
+        }
+
+        public void RebuildStaticBoardForEditor(MatrixSliceMapper mapper)
+        {
+            _mapper = mapper;
+            BuildStaticBoard();
+            CellType[,] map = _mapper != null ? _mapper.BuildCurrentSliceMap() : new CellType[Width, Height];
+            ApplyMappedCells(map, resetPlayerToSpawn: false);
         }
 
         /// <summary>移除超出当前 <see cref="MatrixController.SliceMapWidth"/>×<see cref="MatrixController.SliceMapHeight"/> 的 Tile_*（含旧 7×7 场景残留），避免残留物体。</summary>
@@ -211,6 +224,7 @@ namespace LandscapeMatrix
 
         private void ApplyMappedCells(CellType[,] mappedCells, bool resetPlayerToSpawn)
         {
+            EnsureBoardMatchesMap(mappedCells);
             _spawnCell = new Vector2Int(-1, -1);
             _goalCell = new Vector2Int(-1, -1);
 
@@ -369,6 +383,35 @@ namespace LandscapeMatrix
             return cell.x >= 0 && cell.x < Width && cell.y >= 0 && cell.y < Height;
         }
 
+        private int GetConfiguredWidth()
+        {
+            MatrixController matrix = _mapper != null ? _mapper.GetMatrixController() : null;
+            return matrix != null ? matrix.SliceMapWidth : MatrixController.DefaultMatrixSize;
+        }
+
+        private int GetConfiguredHeight()
+        {
+            MatrixController matrix = _mapper != null ? _mapper.GetMatrixController() : null;
+            return matrix != null ? matrix.SliceMapHeight : MatrixController.DefaultMatrixSize + 1;
+        }
+
+        private void EnsureBoardMatchesMap(CellType[,] mappedCells)
+        {
+            if (mappedCells == null)
+            {
+                return;
+            }
+
+            if (_cells.GetLength(0) == mappedCells.GetLength(0) && _cells.GetLength(1) == mappedCells.GetLength(1))
+            {
+                return;
+            }
+
+            _cells = new CellType[mappedCells.GetLength(0), mappedCells.GetLength(1)];
+            _tiles = new GameObject[mappedCells.GetLength(0), mappedCells.GetLength(1)];
+            BuildStaticBoard();
+        }
+
         public bool IsSolid(Vector2Int cell)
         {
             if (!IsInside(cell))
@@ -457,7 +500,7 @@ namespace LandscapeMatrix
             return new Vector2Int(SliceMinX, 1);
         }
 
-        private static bool IsInSliceX(int x)
+        private bool IsInSliceX(int x)
         {
             return x >= SliceMinX && x <= SliceMaxX;
         }
