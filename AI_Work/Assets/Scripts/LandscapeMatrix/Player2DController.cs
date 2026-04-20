@@ -43,7 +43,7 @@ namespace LandscapeMatrix
 
         public void ClampInsideBoard()
         {
-            SetCell(_playfield.ResolveStandingCell(_cell));
+            SetCell(_playfield.ResolveStandingCell());
         }
 
         public void ResolveAfterTerrainChange()
@@ -110,7 +110,7 @@ namespace LandscapeMatrix
                     _playfield.SetLockedColumn(nextCell.x);
                 }
 
-                SetCell(_playfield.ResolveStandingCell(nextCell));
+                SetCell(_playfield.ResolveStandingCell());
                 CheckGoal();
             }
 
@@ -119,22 +119,12 @@ namespace LandscapeMatrix
 
         private static Vector2Int ReadDirectionInput()
         {
-            if (Input.GetKey(KeyCode.A))
+            if (Input.GetKey(KeyCode.A) || Input.GetKey(KeyCode.LeftArrow))
             {
                 return Vector2Int.left;
             }
 
-            if (Input.GetKey(KeyCode.D))
-            {
-                return Vector2Int.right;
-            }
-
-            if (Input.GetKey(KeyCode.LeftArrow))
-            {
-                return Vector2Int.left;
-            }
-
-            if (Input.GetKey(KeyCode.RightArrow))
+            if (Input.GetKey(KeyCode.D) || Input.GetKey(KeyCode.RightArrow))
             {
                 return Vector2Int.right;
             }

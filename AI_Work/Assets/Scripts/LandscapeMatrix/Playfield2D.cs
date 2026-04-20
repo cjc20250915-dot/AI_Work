@@ -459,7 +459,7 @@ namespace LandscapeMatrix
             return new Vector2Int(-1, -1);
         }
 
-        public Vector2Int ResolveStandingCell(Vector2Int desiredCell)
+        public Vector2Int ResolveStandingCell()
         {
             Vector2Int stand = FindLowestStandInColumn(_lockedColumnX);
             return stand.x < 0 ? GetSpawnCell() : stand;

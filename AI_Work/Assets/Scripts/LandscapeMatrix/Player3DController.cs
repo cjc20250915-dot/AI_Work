@@ -217,11 +217,6 @@ namespace LandscapeMatrix
         /// </summary>
         public bool IsOverlappingMatrixVoxels()
         {
-            return IsOverlappingMatrixVoxelGeometry();
-        }
-
-        private bool IsOverlappingMatrixVoxelGeometry()
-        {
             // Unity 默认 Physics.autoSyncTransforms=false：NotifyStateChanged 里刚把 visualRoot 旋转/平移过，
             // 但物理场景里的 Collider 还停留在旧位置；直接查 OverlapBox 会看到"旧体素"布局。强制同步后再查询。
             Physics.SyncTransforms();
@@ -325,15 +320,10 @@ namespace LandscapeMatrix
             _player2D.CheckGoal();
         }
 
-        public Vector3 GetFeetWorldPositionForDebug()
+        public Vector3 GetFeetWorldPosition()
         {
             Vector3 bottomLocal = _controller.center - Vector3.up * (_controller.height * 0.5f - _controller.skinWidth);
             return transform.TransformPoint(bottomLocal);
-        }
-
-        private Vector3 GetFeetWorldPosition()
-        {
-            return GetFeetWorldPositionForDebug();
         }
 
         private void LogPlayerDebugState(Vector2Int standCell)

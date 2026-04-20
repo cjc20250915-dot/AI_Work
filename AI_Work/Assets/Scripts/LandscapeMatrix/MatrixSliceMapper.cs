@@ -126,17 +126,10 @@ namespace LandscapeMatrix
 
         private CellType[,] BuildBaseMap()
         {
-            int width = _matrix != null ? _matrix.SliceMapWidth : MatrixController.DefaultMatrixSize;
+            int width = SliceWidth;
             int height = _matrix != null ? _matrix.SliceMapHeight : MatrixController.DefaultMatrixSize + 1;
+            // new CellType[,] 初值即 CellType.Empty (0)，省去显式填充循环。
             CellType[,] cells = new CellType[width, height];
-
-            for (int x = 0; x < width; x++)
-            {
-                for (int y = 0; y < height; y++)
-                {
-                    cells[x, y] = CellType.Empty;
-                }
-            }
 
             if (_matrix == null)
             {
@@ -247,7 +240,7 @@ namespace LandscapeMatrix
                 return new Vector2Int(-1, -1);
             }
 
-            if (preferred.HasValue && CellListContains(candidates, preferred.Value))
+            if (preferred.HasValue && candidates.Contains(preferred.Value))
             {
                 return preferred.Value;
             }
@@ -257,7 +250,7 @@ namespace LandscapeMatrix
                 for (int y = SliceMin; y <= SliceMaxY; y++)
                 {
                     Vector2Int c = new Vector2Int(x, y);
-                    if (CellListContains(candidates, c))
+                    if (candidates.Contains(c))
                     {
                         return c;
                     }
@@ -274,7 +267,7 @@ namespace LandscapeMatrix
                 return new Vector2Int(-1, -1);
             }
 
-            if (preferred.HasValue && CellListContains(candidates, preferred.Value) && preferred.Value != spawn)
+            if (preferred.HasValue && preferred.Value != spawn && candidates.Contains(preferred.Value))
             {
                 return preferred.Value;
             }
@@ -284,7 +277,7 @@ namespace LandscapeMatrix
                 for (int y = SliceMin; y <= SliceMaxY; y++)
                 {
                     Vector2Int c = new Vector2Int(x, y);
-                    if (CellListContains(candidates, c) && c != spawn)
+                    if (c != spawn && candidates.Contains(c))
                     {
                         return c;
                     }
@@ -292,19 +285,6 @@ namespace LandscapeMatrix
             }
 
             return new Vector2Int(-1, -1);
-        }
-
-        private static bool CellListContains(List<Vector2Int> list, Vector2Int cell)
-        {
-            for (int i = 0; i < list.Count; i++)
-            {
-                if (list[i] == cell)
-                {
-                    return true;
-                }
-            }
-
-            return false;
         }
     }
 }

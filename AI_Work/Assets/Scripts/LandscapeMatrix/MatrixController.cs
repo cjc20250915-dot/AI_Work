@@ -146,6 +146,13 @@ namespace LandscapeMatrix
         private readonly List<Button> _cachedMatrixButtons = new List<Button>(8);
         private Transform _cachedSlicePlane;
         private Camera _cachedSliceCamera;
+
+        /// <summary>
+        /// 体素 Transform 查询缓存，避免反复 <see cref="FindDirectChildByName"/> 扫描 visualRoot 的全部子物体。
+        /// 关联的 <see cref="visualRoot"/> 或矩阵尺寸变化时自动失效重建；被销毁的缓存项在下次访问时回退到 Find 再重新记录。
+        /// </summary>
+        private Transform[,,] _voxelTransformCache;
+        private Transform _voxelTransformCacheRoot;
         private bool _levelClearedFrom3DOverlap;
         private Playfield2D _cachedPlayfield;
         private string _pendingDebugReason = "StateChanged";
@@ -472,7 +479,50 @@ namespace LandscapeMatrix
                 return null;
             }
 
-            return FindDirectChildByName(visualRoot, VoxelObjectName(x, y, z));
+            int n = CurrentMatrixSize;
+            if (x < 0 || x >= n || y < 0 || y >= n || z < 0 || z >= n)
+            {
+                return null;
+            }
+
+            if (_voxelTransformCache == null ||
+                _voxelTransformCacheRoot != visualRoot ||
+                _voxelTransformCache.GetLength(0) != n)
+            {
+                _voxelTransformCache = new Transform[n, n, n];
+                _voxelTransformCacheRoot = visualRoot;
+            }
+
+            Transform cached = _voxelTransformCache[x, y, z];
+            // Unity 的 UnityEngine.Object 重载了 == null 以检测已销毁对象。
+            // 若缓存被重新 parent（极少见，但 DeduplicateMatrixVisualRoots 可能发生），需回退到 Find。
+            if (cached != null && cached.parent == visualRoot)
+            {
+                return cached;
+            }
+
+            Transform found = FindDirectChildByName(visualRoot, VoxelObjectName(x, y, z));
+            _voxelTransformCache[x, y, z] = found;
+            return found;
+        }
+
+        /// <summary>
+        /// 供对整块体素网格做批量处理的方法复用：在当前矩阵尺寸范围内枚举 (x,y,z)。
+        /// 保持 x→y→z 的访问顺序与原版循环一致，避免对依赖遍历顺序的调用方产生影响。
+        /// </summary>
+        private void ForEachVoxelIndex(System.Action<int, int, int> callback)
+        {
+            int n = CurrentMatrixSize;
+            for (int x = 0; x < n; x++)
+            {
+                for (int y = 0; y < n; y++)
+                {
+                    for (int z = 0; z < n; z++)
+                    {
+                        callback(x, y, z);
+                    }
+                }
+            }
         }
 
         private void DestroyLegacyVoxelsOutsideDataBounds()
@@ -516,7 +566,7 @@ namespace LandscapeMatrix
         }
 
         /// <summary>
-        /// 保证 MatrixVisual 下存在全部 27 个体素物体（编辑态写入场景；缺失则创建）。
+        /// 保证 MatrixVisual 下存在全部体素物体（编辑态写入场景；缺失则创建）。
         /// 不删除已有物体，避免反复清空再生成。
         /// </summary>
         private void EnsureVoxelGridComplete()
@@ -526,27 +576,26 @@ namespace LandscapeMatrix
                 return;
             }
 
-            for (int x = 0; x < CurrentMatrixSize; x++)
+            ForEachVoxelIndex((x, y, z) =>
             {
-                for (int y = 0; y < CurrentMatrixSize; y++)
+                if (FindVoxelTransform(x, y, z) != null)
                 {
-                    for (int z = 0; z < CurrentMatrixSize; z++)
-                    {
-                        if (FindVoxelTransform(x, y, z) != null)
-                        {
-                            continue;
-                        }
-
-                        GameObject cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
-                        cube.name = VoxelObjectName(x, y, z);
-                        cube.transform.SetParent(visualRoot, false);
-                        cube.transform.localPosition = new Vector3(GetCenteredAxisCoordinate(x), y, GetCenteredAxisCoordinate(z));
-                        cube.transform.localScale = Vector3.one * VoxelVisualSize;
-                        LandscapeMatrixRendererColors.SetColor(cube.GetComponent<Renderer>(), VoxelNeutralColor);
-                        cube.SetActive(true);
-                    }
+                    return;
                 }
-            }
+
+                GameObject cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                cube.name = VoxelObjectName(x, y, z);
+                cube.transform.SetParent(visualRoot, false);
+                cube.transform.localPosition = new Vector3(GetCenteredAxisCoordinate(x), y, GetCenteredAxisCoordinate(z));
+                cube.transform.localScale = Vector3.one * VoxelVisualSize;
+                LandscapeMatrixRendererColors.SetColor(cube.GetComponent<Renderer>(), VoxelNeutralColor);
+                cube.SetActive(true);
+
+                if (_voxelTransformCache != null && _voxelTransformCacheRoot == visualRoot)
+                {
+                    _voxelTransformCache[x, y, z] = cube.transform;
+                }
+            });
         }
 
         private void SyncVoxelTransformsToCurrentLayout()
@@ -556,24 +605,18 @@ namespace LandscapeMatrix
                 return;
             }
 
-            for (int x = 0; x < CurrentMatrixSize; x++)
+            ForEachVoxelIndex((x, y, z) =>
             {
-                for (int y = 0; y < CurrentMatrixSize; y++)
+                Transform voxel = FindVoxelTransform(x, y, z);
+                if (voxel == null)
                 {
-                    for (int z = 0; z < CurrentMatrixSize; z++)
-                    {
-                        Transform voxel = FindVoxelTransform(x, y, z);
-                        if (voxel == null)
-                        {
-                            continue;
-                        }
-
-                        voxel.localPosition = new Vector3(GetCenteredAxisCoordinate(x), y, GetCenteredAxisCoordinate(z));
-                        voxel.localRotation = Quaternion.identity;
-                        voxel.localScale = Vector3.one * VoxelVisualSize;
-                    }
+                    return;
                 }
-            }
+
+                voxel.localPosition = new Vector3(GetCenteredAxisCoordinate(x), y, GetCenteredAxisCoordinate(z));
+                voxel.localRotation = Quaternion.identity;
+                voxel.localScale = Vector3.one * VoxelVisualSize;
+            });
         }
 
         public void RebuildStaticSceneVisualsForEditor()
@@ -608,40 +651,33 @@ namespace LandscapeMatrix
                 return;
             }
 
-            for (int x = 0; x < CurrentMatrixSize; x++)
+            ForEachVoxelIndex((x, y, z) =>
             {
-                for (int y = 0; y < CurrentMatrixSize; y++)
+                Transform t = FindVoxelTransform(x, y, z);
+                if (t == null)
                 {
-                    for (int z = 0; z < CurrentMatrixSize; z++)
+                    return;
+                }
+
+                GameObject go = t.gameObject;
+                if (voxelData[x, y, z])
+                {
+                    go.SetActive(true);
+                    if (go.TryGetComponent(out Renderer r))
                     {
-                        Transform t = FindVoxelTransform(x, y, z);
-                        if (t == null)
-                        {
-                            continue;
-                        }
+                        r.enabled = true;
+                    }
 
-                        bool filled = voxelData[x, y, z];
-                        GameObject go = t.gameObject;
-                        if (filled)
-                        {
-                            go.SetActive(true);
-                            if (go.TryGetComponent(out Renderer r))
-                            {
-                                r.enabled = true;
-                            }
-
-                            if (go.TryGetComponent(out Collider col))
-                            {
-                                col.enabled = true;
-                            }
-                        }
-                        else
-                        {
-                            go.SetActive(false);
-                        }
+                    if (go.TryGetComponent(out Collider col))
+                    {
+                        col.enabled = true;
                     }
                 }
-            }
+                else
+                {
+                    go.SetActive(false);
+                }
+            });
 
             SyncPresentationVisualsFromLogicalRoot();
         }
@@ -679,7 +715,19 @@ namespace LandscapeMatrix
             NotifyStateChanged();
         }
 
-        public void MoveForward()
+        public void MoveForward() => ExecuteMatrixOperation("MoveForward", () => GridOffset = ClampOffset(GridOffset + new Vector3Int(0, 0, 1)));
+
+        public void MoveBackward() => ExecuteMatrixOperation("MoveBackward", () => GridOffset = ClampOffset(GridOffset + new Vector3Int(0, 0, -1)));
+
+        public void RotateClockwise() => ExecuteMatrixOperation("RotateClockwise", () => RotationStep = (RotationStep + 1) % 4);
+
+        public void RotateCounterClockwise() => ExecuteMatrixOperation("RotateCounterClockwise", () => RotationStep = (RotationStep + 3) % 4);
+
+        /// <summary>
+        /// 4 个矩阵操作（前进/后退/顺时针/逆时针）的公共骨架：
+        /// 先校验可操作→保存撤销快照→置忙标记→执行操作→通知刷新。try/finally 保证 IsMatrixStateChanging 永远复位。
+        /// </summary>
+        private void ExecuteMatrixOperation(string debugReason, System.Action mutate)
         {
             if (!CanProceedMatrixOperation())
             {
@@ -690,77 +738,9 @@ namespace LandscapeMatrix
             IsMatrixStateChanging = true;
             try
             {
-                _pendingDebugReason = "MoveForward";
+                _pendingDebugReason = debugReason;
                 _checkFusionAfterNotify = true;
-                GridOffset += new Vector3Int(0, 0, 1);
-                GridOffset = ClampOffset(GridOffset);
-                NotifyStateChanged();
-            }
-            finally
-            {
-                IsMatrixStateChanging = false;
-            }
-        }
-
-        public void MoveBackward()
-        {
-            if (!CanProceedMatrixOperation())
-            {
-                return;
-            }
-
-            CaptureUndoStateBeforeOperation();
-            IsMatrixStateChanging = true;
-            try
-            {
-                _pendingDebugReason = "MoveBackward";
-                _checkFusionAfterNotify = true;
-                GridOffset += new Vector3Int(0, 0, -1);
-                GridOffset = ClampOffset(GridOffset);
-                NotifyStateChanged();
-            }
-            finally
-            {
-                IsMatrixStateChanging = false;
-            }
-        }
-
-        public void RotateClockwise()
-        {
-            if (!CanProceedMatrixOperation())
-            {
-                return;
-            }
-
-            CaptureUndoStateBeforeOperation();
-            IsMatrixStateChanging = true;
-            try
-            {
-                _pendingDebugReason = "RotateClockwise";
-                _checkFusionAfterNotify = true;
-                RotationStep = (RotationStep + 1) % 4;
-                NotifyStateChanged();
-            }
-            finally
-            {
-                IsMatrixStateChanging = false;
-            }
-        }
-
-        public void RotateCounterClockwise()
-        {
-            if (!CanProceedMatrixOperation())
-            {
-                return;
-            }
-
-            CaptureUndoStateBeforeOperation();
-            IsMatrixStateChanging = true;
-            try
-            {
-                _pendingDebugReason = "RotateCounterClockwise";
-                _checkFusionAfterNotify = true;
-                RotationStep = (RotationStep + 3) % 4;
+                mutate();
                 NotifyStateChanged();
             }
             finally
@@ -1154,27 +1134,21 @@ namespace LandscapeMatrix
                 return;
             }
 
-            for (int x = 0; x < CurrentMatrixSize; x++)
+            ForEachVoxelIndex((x, y, z) =>
             {
-                for (int y = 0; y < CurrentMatrixSize; y++)
+                if (!voxelData[x, y, z])
                 {
-                    for (int z = 0; z < CurrentMatrixSize; z++)
-                    {
-                        if (!voxelData[x, y, z])
-                        {
-                            continue;
-                        }
-
-                        Transform t = FindVoxelTransform(x, y, z);
-                        if (t == null)
-                        {
-                            continue;
-                        }
-
-                        SetVoxelRendererColor(t, VoxelNeutralColor);
-                    }
+                    return;
                 }
-            }
+
+                Transform t = FindVoxelTransform(x, y, z);
+                if (t == null)
+                {
+                    return;
+                }
+
+                SetVoxelRendererColor(t, VoxelNeutralColor);
+            });
 
             bool spawnFromPreferred = false;
             bool goalFromPreferred = false;
@@ -1749,7 +1723,7 @@ namespace LandscapeMatrix
                 return false;
             }
 
-            return TryMapFeetWorldPositionToSliceInfo(player3D.GetFeetWorldPositionForDebug(), out standCell, out storageCoord);
+            return TryMapFeetWorldPositionToSliceInfo(player3D.GetFeetWorldPosition(), out standCell, out storageCoord);
         }
 
         private void EnsureSliceCameraCached()
@@ -2014,14 +1988,19 @@ namespace LandscapeMatrix
 
         private bool[,,] BuildVoxelData()
         {
-            bool[,,] data = new bool[CurrentMatrixSize, CurrentMatrixSize, CurrentMatrixSize];
-            for (int x = 0; x < CurrentMatrixSize; x++)
+            int n = CurrentMatrixSize;
+            bool[,,] data = new bool[n, n, n];
+            // bool[,,] 默认全 false；仅当 defaultVoxelVisible 为 true 时才需要显式置 true。
+            if (defaultVoxelVisible)
             {
-                for (int y = 0; y < CurrentMatrixSize; y++)
+                for (int x = 0; x < n; x++)
                 {
-                    for (int z = 0; z < CurrentMatrixSize; z++)
+                    for (int y = 0; y < n; y++)
                     {
-                        data[x, y, z] = defaultVoxelVisible;
+                        for (int z = 0; z < n; z++)
+                        {
+                            data[x, y, z] = true;
+                        }
                     }
                 }
             }
@@ -2031,9 +2010,9 @@ namespace LandscapeMatrix
                 for (int i = 0; i < hiddenVoxels.Length; i++)
                 {
                     VoxelCoord coord = hiddenVoxels[i];
-                    if (coord.x < 0 || coord.x >= CurrentMatrixSize ||
-                        coord.y < 0 || coord.y >= CurrentMatrixSize ||
-                        coord.z < 0 || coord.z >= CurrentMatrixSize)
+                    if (coord.x < 0 || coord.x >= n ||
+                        coord.y < 0 || coord.y >= n ||
+                        coord.z < 0 || coord.z >= n)
                     {
                         continue;
                     }
@@ -2323,38 +2302,32 @@ namespace LandscapeMatrix
                 _presentationRoot.SetParent(transform, false);
             }
 
-            for (int x = 0; x < CurrentMatrixSize; x++)
+            ForEachVoxelIndex((x, y, z) =>
             {
-                for (int y = 0; y < CurrentMatrixSize; y++)
+                Transform logicalVoxel = FindVoxelTransform(x, y, z);
+                if (logicalVoxel == null)
                 {
-                    for (int z = 0; z < CurrentMatrixSize; z++)
+                    return;
+                }
+
+                Transform presentationVoxel = FindDirectChildByName(_presentationRoot, VoxelObjectName(x, y, z));
+                if (presentationVoxel == null)
+                {
+                    GameObject visualOnly = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                    visualOnly.name = VoxelObjectName(x, y, z);
+                    presentationVoxel = visualOnly.transform;
+                    presentationVoxel.SetParent(_presentationRoot, false);
+
+                    Collider visualCollider = visualOnly.GetComponent<Collider>();
+                    if (visualCollider != null)
                     {
-                        Transform logicalVoxel = FindVoxelTransform(x, y, z);
-                        if (logicalVoxel == null)
-                        {
-                            continue;
-                        }
-
-                        Transform presentationVoxel = FindDirectChildByName(_presentationRoot, VoxelObjectName(x, y, z));
-                        if (presentationVoxel == null)
-                        {
-                            GameObject visualOnly = GameObject.CreatePrimitive(PrimitiveType.Cube);
-                            visualOnly.name = VoxelObjectName(x, y, z);
-                            presentationVoxel = visualOnly.transform;
-                            presentationVoxel.SetParent(_presentationRoot, false);
-
-                            Collider visualCollider = visualOnly.GetComponent<Collider>();
-                            if (visualCollider != null)
-                            {
-                                visualCollider.enabled = false;
-                                Object.Destroy(visualCollider);
-                            }
-                        }
-
-                        CopyRendererVisualState(logicalVoxel, presentationVoxel);
+                        visualCollider.enabled = false;
+                        Object.Destroy(visualCollider);
                     }
                 }
-            }
+
+                CopyRendererVisualState(logicalVoxel, presentationVoxel);
+            });
 
             SetLogicalVoxelRenderersVisible(!_enablePresentationMotion);
             _presentationRoot.gameObject.SetActive(_enablePresentationMotion);
@@ -2373,23 +2346,17 @@ namespace LandscapeMatrix
                 return;
             }
 
-            for (int x = 0; x < CurrentMatrixSize; x++)
+            ForEachVoxelIndex((x, y, z) =>
             {
-                for (int y = 0; y < CurrentMatrixSize; y++)
+                Transform logicalVoxel = FindVoxelTransform(x, y, z);
+                Transform presentationVoxel = FindDirectChildByName(_presentationRoot, VoxelObjectName(x, y, z));
+                if (logicalVoxel == null || presentationVoxel == null)
                 {
-                    for (int z = 0; z < CurrentMatrixSize; z++)
-                    {
-                        Transform logicalVoxel = FindVoxelTransform(x, y, z);
-                        Transform presentationVoxel = FindDirectChildByName(_presentationRoot, VoxelObjectName(x, y, z));
-                        if (logicalVoxel == null || presentationVoxel == null)
-                        {
-                            continue;
-                        }
-
-                        CopyRendererVisualState(logicalVoxel, presentationVoxel);
-                    }
+                    return;
                 }
-            }
+
+                CopyRendererVisualState(logicalVoxel, presentationVoxel);
+            });
         }
 
         private static void CopyRendererVisualState(Transform source, Transform target)
@@ -2426,22 +2393,16 @@ namespace LandscapeMatrix
                 return;
             }
 
-            for (int x = 0; x < CurrentMatrixSize; x++)
+            ForEachVoxelIndex((x, y, z) =>
             {
-                for (int y = 0; y < CurrentMatrixSize; y++)
+                Transform logicalVoxel = FindVoxelTransform(x, y, z);
+                if (logicalVoxel == null || !logicalVoxel.TryGetComponent(out Renderer renderer))
                 {
-                    for (int z = 0; z < CurrentMatrixSize; z++)
-                    {
-                        Transform logicalVoxel = FindVoxelTransform(x, y, z);
-                        if (logicalVoxel == null || !logicalVoxel.TryGetComponent(out Renderer renderer))
-                        {
-                            continue;
-                        }
-
-                        renderer.enabled = visible && logicalVoxel.gameObject.activeSelf;
-                    }
+                    return;
                 }
-            }
+
+                renderer.enabled = visible && logicalVoxel.gameObject.activeSelf;
+            });
         }
 
         private void ApplyPresentationPose(Vector3 targetLocalPosition, Quaternion targetLocalRotation)

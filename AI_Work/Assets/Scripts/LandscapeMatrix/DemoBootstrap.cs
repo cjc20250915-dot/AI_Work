@@ -1,37 +1,14 @@
 using UnityEngine;
-using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 
 namespace LandscapeMatrix
 {
+    /// <summary>
+    /// 供编辑器工具（<c>LandscapeMatrixSceneMigrationTool</c>）一键重建 Level_01 场景骨架；
+    /// 运行时不再使用，历史自启流程已移除。
+    /// </summary>
     public class DemoBootstrap : MonoBehaviour
     {
-        private const string SceneName = "Level_01";
-        private static readonly bool EnableRuntimeBootstrap = false;
-
-        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
-        private static void Bootstrap()
-        {
-            if (!EnableRuntimeBootstrap)
-            {
-                return;
-            }
-
-            Scene activeScene = SceneManager.GetActiveScene();
-            if (activeScene.name != SceneName)
-            {
-                return;
-            }
-
-            if (Object.FindFirstObjectByType<DemoBootstrap>() != null)
-            {
-                return;
-            }
-
-            GameObject root = new GameObject("Level_01_Root");
-            root.AddComponent<DemoBootstrap>().BuildScene();
-        }
-
         [ContextMenu("Build Level_01 Skeleton")]
         public void BuildScene()
         {

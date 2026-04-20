@@ -38,12 +38,12 @@ RenderSettings:
   m_ReflectionIntensity: 1
   m_CustomReflection: {fileID: 0}
   m_Sun: {fileID: 0}
-  m_IndirectSpecularColor: {r: 0.18028378, g: 0.22571412, b: 0.30692285, a: 1}
   m_UseRadianceAmbientProbe: 0
 --- !u!157 &3
 LightmapSettings:
   m_ObjectHideFlags: 0
-  serializedVersion: 12
+  serializedVersion: 13
+  m_BakeOnSceneLoad: 0
   m_GISettings:
     serializedVersion: 2
     m_BounceScale: 1
@@ -250,12 +250,12 @@ MonoBehaviour:
   m_RequiresColorTexture: 0
   m_Version: 2
   m_TaaSettings:
-    quality: 3
-    frameInfluence: 0.1
-    jitterScale: 1
-    mipBias: 0
-    varianceClampScale: 0.9
-    contrastAdaptiveSharpening: 0
+    m_Quality: 3
+    m_FrameInfluence: 0.1
+    m_JitterScale: 1
+    m_MipBias: 0
+    m_VarianceClampScale: 0.9
+    m_ContrastAdaptiveSharpening: 0
 --- !u!1 &1000001
 GameObject:
   m_ObjectHideFlags: 0
@@ -352,7 +352,7 @@ RectTransform:
   m_GameObject: {fileID: 1100001}
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
   m_LocalPosition: {x: 0, y: 0, z: 0}
-  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_LocalScale: {x: 0, y: 0, z: 0}
   m_ConstrainProportionsScale: 0
   m_Children:
   - {fileID: 1110002}
@@ -508,7 +508,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: 景观矩阵
+  m_Text: "\u666F\u89C2\u77E9\u9635"
 --- !u!1 &1120001
 GameObject:
   m_ObjectHideFlags: 0
@@ -720,7 +720,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: 开始游戏
+  m_Text: "\u5F00\u59CB\u6E38\u620F"
 --- !u!1 &1130001
 GameObject:
   m_ObjectHideFlags: 0
@@ -932,7 +932,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: 帮助
+  m_Text: "\u5E2E\u52A9"
 --- !u!1 &1140001
 GameObject:
   m_ObjectHideFlags: 0
@@ -1144,7 +1144,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: 退出游戏
+  m_Text: "\u9000\u51FA\u6E38\u620F"
 --- !u!1 &1150001
 GameObject:
   m_ObjectHideFlags: 0
@@ -1377,7 +1377,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: 玩法说明
+  m_Text: "\u73A9\u6CD5\u8BF4\u660E"
 --- !u!1 &1153001
 GameObject:
   m_ObjectHideFlags: 0
@@ -1456,7 +1456,9 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1.2
-  m_Text: "· 在关卡选择界面点选关卡进入。\n· 使用 WASD / 方向键移动角色。\n· 按空格键或回车切换 2D / 3D 视角。\n· 利用不同视角下的地形走到目标点即可通关。\n· 通关后可返回关卡选择继续挑战下一关。"
+  m_Text: "\xB7 \u5728\u5173\u5361\u9009\u62E9\u754C\u9762\u70B9\u9009\u5173\u5361\u8FDB\u5165\u3002\n\xB7
+    \u4F7F\u7528 AD \u79FB\u52A8\u89D2\u8272\u3002\n\xB7 \u5229\u7528\u4E0D\u540C\u89C6\u89D2\u4E0B\u7684\u5730\u5F62\u8D70\u5230\u76EE\u6807\u70B9\u5373\u53EF\u901A\u5173\u3002\n\xB7
+    \u901A\u5173\u540E\u53EF\u8FD4\u56DE\u5173\u5361\u9009\u62E9\u7EE7\u7EED\u6311\u6218\u4E0B\u4E00\u5173\u3002"
 --- !u!1 &1154001
 GameObject:
   m_ObjectHideFlags: 0
@@ -1668,7 +1670,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: 关闭
+  m_Text: "\u5173\u95ED"
 --- !u!1 &1200001
 GameObject:
   m_ObjectHideFlags: 0
