@@ -64,6 +64,8 @@ public static class Level03StaticSceneRebuilder
             return;
         }
 
+        // hiddenVoxels 以场景中 MatrixController 当前配置为准，
+        // 避免每次打开场景把用户手动调好的隐藏方格列表冲回 LevelDefinition。
         matrix.ApplyLevelData(
             definition.matrixSize,
             definition.sliceMapWidth,
@@ -71,7 +73,7 @@ public static class Level03StaticSceneRebuilder
             definition.initialGridOffset,
             definition.initialRotationStep,
             definition.defaultVoxelVisible,
-            definition.hiddenVoxels);
+            matrix.hiddenVoxels);
         mapper.ApplyLevelData(definition.preferredSpawnVoxel, definition.preferredGoalVoxel);
         matrix.RebuildStaticSceneVisualsForEditor();
         playfield.RebuildStaticBoardForEditor(mapper);

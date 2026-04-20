@@ -44,6 +44,9 @@ namespace LandscapeMatrix
 
             if (_matrixController != null)
             {
+                // hiddenVoxels 以场景中 MatrixController Inspector 配置为准；
+                // LevelDefinition.hiddenVoxels 仅作为首次搭建关卡时的初始模板，
+                // 不在运行时覆盖用户已经手动调整过的矩阵布局。
                 _matrixController.ApplyLevelData(
                     _levelDefinition.matrixSize,
                     _levelDefinition.sliceMapWidth,
@@ -51,7 +54,7 @@ namespace LandscapeMatrix
                     _levelDefinition.initialGridOffset,
                     _levelDefinition.initialRotationStep,
                     _levelDefinition.defaultVoxelVisible,
-                    _levelDefinition.hiddenVoxels);
+                    _matrixController.hiddenVoxels);
             }
 
             if (_sliceMapper != null)

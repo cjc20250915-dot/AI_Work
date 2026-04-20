@@ -150,6 +150,15 @@ namespace LandscapeMatrix
         private Playfield2D _cachedPlayfield;
         private string _pendingDebugReason = "StateChanged";
 
+        private bool _hasPreviousMatrixState;
+        private Vector3Int _previousGridOffset;
+        private int _previousRotationStep;
+        private Vector2Int _previousPlayerCell;
+        private Player3DController.UndoSnapshot _previousPlayerSnapshot;
+        private bool _hasPreviousPlayerSnapshot;
+        private bool _checkFusionAfterNotify;
+        private bool _suppressPlayerSnapOnNotify;
+
 #if UNITY_EDITOR
         [System.NonSerialized]
         private bool _inspectorValidationDelayQueued;
@@ -677,10 +686,12 @@ namespace LandscapeMatrix
                 return;
             }
 
+            CaptureUndoStateBeforeOperation();
             IsMatrixStateChanging = true;
             try
             {
                 _pendingDebugReason = "MoveForward";
+                _checkFusionAfterNotify = true;
                 GridOffset += new Vector3Int(0, 0, 1);
                 GridOffset = ClampOffset(GridOffset);
                 NotifyStateChanged();
@@ -698,10 +709,12 @@ namespace LandscapeMatrix
                 return;
             }
 
+            CaptureUndoStateBeforeOperation();
             IsMatrixStateChanging = true;
             try
             {
                 _pendingDebugReason = "MoveBackward";
+                _checkFusionAfterNotify = true;
                 GridOffset += new Vector3Int(0, 0, -1);
                 GridOffset = ClampOffset(GridOffset);
                 NotifyStateChanged();
@@ -719,10 +732,12 @@ namespace LandscapeMatrix
                 return;
             }
 
+            CaptureUndoStateBeforeOperation();
             IsMatrixStateChanging = true;
             try
             {
                 _pendingDebugReason = "RotateClockwise";
+                _checkFusionAfterNotify = true;
                 RotationStep = (RotationStep + 1) % 4;
                 NotifyStateChanged();
             }
@@ -739,15 +754,98 @@ namespace LandscapeMatrix
                 return;
             }
 
+            CaptureUndoStateBeforeOperation();
             IsMatrixStateChanging = true;
             try
             {
                 _pendingDebugReason = "RotateCounterClockwise";
+                _checkFusionAfterNotify = true;
                 RotationStep = (RotationStep + 3) % 4;
                 NotifyStateChanged();
             }
             finally
             {
+                IsMatrixStateChanging = false;
+            }
+        }
+
+        /// <summary>
+        /// 在 4 个矩阵操作执行前统一调用：保存 <see cref="GridOffset"/>、<see cref="RotationStep"/>、
+        /// 2D 玩家格与 3D 玩家位姿，供融合弹窗的 Undo 按钮回滚到上一步。
+        /// </summary>
+        private void CaptureUndoStateBeforeOperation()
+        {
+            _previousGridOffset = GridOffset;
+            _previousRotationStep = RotationStep;
+
+            if (boundPlayer != null)
+            {
+                _previousPlayerCell = boundPlayer.GetCurrentCell();
+            }
+            else
+            {
+                _previousPlayerCell = Vector2Int.zero;
+            }
+
+            if (player3D != null)
+            {
+                _previousPlayerSnapshot = player3D.CaptureUndoSnapshot();
+                _hasPreviousPlayerSnapshot = true;
+            }
+            else
+            {
+                _hasPreviousPlayerSnapshot = false;
+            }
+
+            _hasPreviousMatrixState = true;
+        }
+
+        /// <summary>
+        /// 由 <see cref="FusionPresenter"/> 在点击 Undo 时调用：恢复上一次矩阵操作前的姿态与玩家位置。
+        /// </summary>
+        public void UndoLastMatrixOperation()
+        {
+            if (!_hasPreviousMatrixState)
+            {
+                return;
+            }
+
+            _hasPreviousMatrixState = false;
+            _checkFusionAfterNotify = false;
+            _levelClearedFrom3DOverlap = false;
+
+            IsMatrixStateChanging = true;
+            try
+            {
+                _pendingDebugReason = "Undo";
+                GridOffset = ClampOffset(_previousGridOffset);
+                RotationStep = _previousRotationStep % 4;
+
+                // 1) 抑制 NotifyStateChanged 内部的 SnapToStandCell：我们要用 3D 快照直接还原世界位姿，而不是让它按当前 2D 格反算。
+                _suppressPlayerSnapOnNotify = _hasPreviousPlayerSnapshot;
+                NotifyStateChanged();
+
+                // 2) 清理 NotifyStateChanged 内部 RefreshMap → ResolvePlayerAfterTerrainChange 可能留下的死亡标记或被覆盖的 2D 玩家格。
+                Playfield2D playfield = GetCachedPlayfield();
+                if (playfield != null)
+                {
+                    playfield.SetPlayerDead(false);
+                }
+
+                if (boundPlayer != null)
+                {
+                    boundPlayer.SetCell(_previousPlayerCell);
+                }
+
+                // 3) 最后把 3D 玩家放回捕获的世界位姿；下一帧 Player3DController.LateUpdate 会基于此重新解算 _lockedColumnX 与 2D 格。
+                if (_hasPreviousPlayerSnapshot && player3D != null)
+                {
+                    player3D.ApplyUndoSnapshot(_previousPlayerSnapshot);
+                }
+            }
+            finally
+            {
+                _suppressPlayerSnapOnNotify = false;
                 IsMatrixStateChanging = false;
             }
         }
@@ -1735,14 +1833,41 @@ namespace LandscapeMatrix
                 _cachedSlicePlane = null;
             }
 
+            // 融合判定必须在 mapper.ApplyMatrixState / SnapToStandCell 之前：
+            // 后者会把 2D 玩家重定位到"当前列最低立足点"、再把 3D 玩家搬过去，之后再做 OverlapBox 永远看不到重叠。
+            // 这里用"旋转/平移后的新体素位置 + 玩家旧世界位置"做检测：真正有方块挤进玩家体内时才返回 true。
+            bool fusionDetected = false;
+            if (_checkFusionAfterNotify)
+            {
+                _checkFusionAfterNotify = false;
+                if (!_levelClearedFrom3DOverlap && player3D != null && player3D.IsOverlappingMatrixVoxels())
+                {
+                    if (_enableDebugLogs)
+                    {
+                        Debug.Log("[LandscapeMatrix Debug][3DFusion] 角色与方块重合，触发融合弹窗。");
+                    }
+
+                    FusionPresenter.NotifyFusionDetected();
+                    fusionDetected = true;
+                }
+            }
+
             mapper?.ApplyMatrixState();
 
-            if (boundPlayer != null && player3D != null && boundPlayer.ExternalDrive)
+            // 触发了融合弹窗就不要再 SnapToStandCell：保留玩家被挤入方块的姿态，让玩家看到"融合"并可撤销；
+            // 一旦 Snap 到了新的立足格，玩家会瞬移到安全位置，违背弹窗语义。
+            if (!fusionDetected
+                && boundPlayer != null && player3D != null
+                && boundPlayer.ExternalDrive && !_suppressPlayerSnapOnNotify)
             {
                 player3D.SnapToStandCell(boundPlayer.GetCurrentCell());
             }
 
-            TryNotifyLevelClearFrom3DGoalOverlap();
+            if (!fusionDetected)
+            {
+                TryNotifyLevelClearFrom3DGoalOverlap();
+            }
+
             LogDebugSnapshot(_pendingDebugReason);
             _pendingDebugReason = "StateChanged";
 

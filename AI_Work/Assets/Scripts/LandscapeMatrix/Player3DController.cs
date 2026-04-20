@@ -11,10 +11,6 @@ namespace LandscapeMatrix
     [RequireComponent(typeof(CharacterController))]
     public class Player3DController : MonoBehaviour
     {
-        private const float OverlapPushStep = 0.03f;
-        private const int OverlapPushMaxIterations = 48;
-        private const float OverlapEpsilon = 0.02f;
-
         public MatrixController matrix;
 
         [Header("Movement")]
@@ -90,6 +86,40 @@ namespace LandscapeMatrix
             _verticalVelocity = 0f;
         }
 
+        /// <summary>供 Undo 使用的玩家状态快照。</summary>
+        public struct UndoSnapshot
+        {
+            public Vector3 worldPosition;
+            public float verticalVelocity;
+        }
+
+        public UndoSnapshot CaptureUndoSnapshot()
+        {
+            return new UndoSnapshot
+            {
+                worldPosition = transform.position,
+                verticalVelocity = _verticalVelocity
+            };
+        }
+
+        /// <summary>
+        /// 由 <see cref="MatrixController"/> 在 Undo 时调用：直接覆盖世界位置与垂直速度；
+        /// 用 <see cref="CharacterController.enabled"/> 短暂关闭以绕过其对 transform 赋值的限制。
+        /// </summary>
+        public void ApplyUndoSnapshot(UndoSnapshot snapshot)
+        {
+            if (_controller == null)
+            {
+                _controller = GetComponent<CharacterController>();
+            }
+
+            bool wasEnabled = _controller.enabled;
+            _controller.enabled = false;
+            transform.position = snapshot.worldPosition;
+            _controller.enabled = wasEnabled;
+            _verticalVelocity = snapshot.verticalVelocity;
+        }
+
         /// <summary>可点击矩阵 UI、前进后退旋转、重开关卡（仅贴地且矩阵未在应用状态）。</summary>
         public bool CanManipulateMatrix()
         {
@@ -157,7 +187,6 @@ namespace LandscapeMatrix
             _verticalVelocity += gravity * Time.deltaTime;
             move.y = _verticalVelocity;
             _controller.Move(move * Time.deltaTime);
-            ResolveOverlapPushOutOfVoxels();
 
             bool uiOk = CanManipulateMatrix();
             if (uiOk != _lastMatrixUiInteractable)
@@ -182,33 +211,48 @@ namespace LandscapeMatrix
             return true;
         }
 
-        private void ResolveOverlapPushOutOfVoxels()
+        /// <summary>
+        /// 供 <see cref="MatrixController"/> 在矩阵状态变化后调用：判断角色胶囊是否与任何矩阵体素几何重合。
+        /// 原来的"重合即向上推"逻辑已移除，改由 MatrixController 触发融合弹窗 + 撤销流程。
+        /// </summary>
+        public bool IsOverlappingMatrixVoxels()
         {
-            int iter = 0;
-            while (iter < OverlapPushMaxIterations && IsOverlappingMatrixVoxelGeometry())
-            {
-                float push = OverlapPushStep + OverlapEpsilon * (iter / 8);
-                transform.position += Vector3.up * push;
-                if (_verticalVelocity < 0f)
-                {
-                    _verticalVelocity = 0f;
-                }
-
-                iter++;
-            }
+            return IsOverlappingMatrixVoxelGeometry();
         }
 
         private bool IsOverlappingMatrixVoxelGeometry()
         {
+            // Unity 默认 Physics.autoSyncTransforms=false：NotifyStateChanged 里刚把 visualRoot 旋转/平移过，
+            // 但物理场景里的 Collider 还停留在旧位置；直接查 OverlapBox 会看到"旧体素"布局。强制同步后再查询。
+            Physics.SyncTransforms();
+
             Bounds b = _controller.bounds;
-            Vector3 halfExtents = b.extents * 0.92f;
+
+            // SnapToStandCell 刻意让胶囊底嵌入所站方块 skinWidth（供 CharacterController.isGrounded 判定）；
+            // 对"正好位于旋转轴上、位置没变"的地板体素（如 3x3x3 中心列），旋转后玩家仍嵌在它里面。
+            // 底部至少收缩 skinWidth + epsilon 以避开此接触层；顶/侧只做少量 epsilon 收缩保留灵敏度。
+            float skin = Mathf.Max(_controller.skinWidth, 0f);
+            float bottomShrink = skin + 0.02f;
+            const float topShrink = 0.02f;
+            const float sideShrink = 0.02f;
+
+            Vector3 center = b.center;
+            Vector3 halfExtents = b.extents;
+            halfExtents.x = Mathf.Max(0.005f, halfExtents.x - sideShrink);
+            halfExtents.z = Mathf.Max(0.005f, halfExtents.z - sideShrink);
+            halfExtents.y = Mathf.Max(0.005f, halfExtents.y - (bottomShrink + topShrink) * 0.5f);
+            center.y += (bottomShrink - topShrink) * 0.5f;
+
             int count = Physics.OverlapBoxNonAlloc(
-                b.center,
+                center,
                 halfExtents,
                 OverlapScratch,
                 transform.rotation,
                 Physics.DefaultRaycastLayers,
                 QueryTriggerInteraction.Ignore);
+
+            // 第二重 AABB 校验使用与 OverlapBox 同步收缩后的 AABB，避免 Bounds.Intersects 对相切面返回 true。
+            Bounds shrunk = new Bounds(center, halfExtents * 2f);
 
             for (int i = 0; i < count; i++)
             {
@@ -223,7 +267,7 @@ namespace LandscapeMatrix
                     continue;
                 }
 
-                if (h.bounds.Intersects(b))
+                if (h.bounds.Intersects(shrunk))
                 {
                     return true;
                 }
