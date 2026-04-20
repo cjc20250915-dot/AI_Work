@@ -130,12 +130,18 @@ namespace LandscapeMatrix
         [SerializeField] private bool _enablePresentationMotion = true;
         [SerializeField, Min(0f)] private float _presentationMotionDuration = 0.22f;
 
+        [Tooltip("需要跟随矩阵视觉（MatrixPresentation）一起平滑旋转/平移的额外装饰物。\n" +
+                 "把这些 Transform 拖进来，运行时会自动把它们 reparent 到 MatrixPresentation 下，\n" +
+                 "编辑期仍可把它们摆在 Matrix 根下调位置。")]
+        [SerializeField] private Transform[] _extraPresentationProps;
+
         private Transform _goalItemVisual;
         private Transform _presentationRoot;
         private Coroutine _presentationMotionRoutine;
         private Vector3 _presentationDisplayedLocalPosition;
         private Quaternion _presentationDisplayedLocalRotation = Quaternion.identity;
         private bool _presentationPoseInitialized;
+        private readonly HashSet<Transform> _attachedPresentationProps = new HashSet<Transform>();
 
         public Vector3Int GridOffset { get; private set; }
         public int RotationStep { get; private set; }
@@ -2331,6 +2337,45 @@ namespace LandscapeMatrix
 
             SetLogicalVoxelRenderersVisible(!_enablePresentationMotion);
             _presentationRoot.gameObject.SetActive(_enablePresentationMotion);
+
+            AttachExtraPresentationProps();
+        }
+
+        /// <summary>
+        /// 把 <see cref="_extraPresentationProps"/> 里登记的装饰物 reparent 到 <see cref="_presentationRoot"/> 下，
+        /// 这样它们会随 MatrixPresentation 一起平滑旋转/平移，而不是停留在不旋转的 Matrix 根上产生"反向旋转"错觉。
+        /// 保留世界位姿，编辑期摆放的位置不会丢。
+        /// </summary>
+        private void AttachExtraPresentationProps()
+        {
+            if (_presentationRoot == null || _extraPresentationProps == null)
+            {
+                return;
+            }
+
+            for (int i = 0; i < _extraPresentationProps.Length; i++)
+            {
+                Transform prop = _extraPresentationProps[i];
+                if (prop == null || prop == _presentationRoot || prop == transform)
+                {
+                    continue;
+                }
+
+                if (prop.parent == _presentationRoot)
+                {
+                    _attachedPresentationProps.Add(prop);
+                    continue;
+                }
+
+                if (_attachedPresentationProps.Contains(prop))
+                {
+                    // 已经被挂过，但运行期被外部再次 reparent 走了，这里尊重外部意愿不强行抢回来。
+                    continue;
+                }
+
+                prop.SetParent(_presentationRoot, worldPositionStays: true);
+                _attachedPresentationProps.Add(prop);
+            }
         }
 
         private void SyncPresentationVisualsFromLogicalRoot()
