@@ -226,6 +226,10 @@ namespace LandscapeMatrix
                 CreateSliceVisualizer();
                 EnsureAirWalls();
 
+                // Level_02 / Level_03 等场景里烘焙过的多余体素可能仍引用 Built-in Default-Material，
+                // 在 URP build 中呈粉色。统一扫描一次整个矩阵层级（含预烘焙 voxel）替换为 URP 兼容材质。
+                LandscapeMatrixRendererColors.EnsurePipelineCompatibleMaterialsInHierarchy(transform);
+
                 if (Application.isPlaying)
                 {
                     NotifyStateChanged();
@@ -1572,12 +1576,18 @@ namespace LandscapeMatrix
             EnsureSlicePlaneHasNoColliders(quad);
 
             Renderer renderer = quad.GetComponent<Renderer>();
-            if (renderer != null && renderer.sharedMaterial != null)
+            if (renderer != null)
             {
-                Material sliceMat = new Material(renderer.sharedMaterial);
-                // 提高切面辨识度，避免“看不出当前切的是哪一层”。
-                ConfigureSlicePlaneMaterial(sliceMat, new Color(0.15f, 0.92f, 1f, 0.28f));
-                renderer.sharedMaterial = sliceMat;
+                // 在克隆 sharedMaterial 前先修复 URP 构建下 CreatePrimitive 默认 Standard shader 导致的粉色。
+                LandscapeMatrixRendererColors.EnsurePipelineCompatibleMaterial(renderer);
+
+                if (renderer.sharedMaterial != null)
+                {
+                    Material sliceMat = new Material(renderer.sharedMaterial);
+                    // 提高切面辨识度，避免“看不出当前切的是哪一层”。
+                    ConfigureSlicePlaneMaterial(sliceMat, new Color(0.15f, 0.92f, 1f, 0.28f));
+                    renderer.sharedMaterial = sliceMat;
+                }
             }
 
             UpdateSliceVisualizerTransform(quad.transform);
